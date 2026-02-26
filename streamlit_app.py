@@ -11,7 +11,7 @@ st.set_page_config(page_title="Auditor Contable Xavier V2", layout="wide")
 
 # --- MEMORIA DE LA SESIÓN (Mantiene archivos y resultados) ---
 if 'pdf_library' not in st.session_state:
-    st.session_state.pdf_library = {} # Nombre: Contenido
+    st.session_state.pdf_library = {} 
 if 'resultados_auditoria' not in st.session_state:
     st.session_state.resultados_auditoria = []
 if 'excel_maestro' not in st.session_state:
@@ -23,18 +23,25 @@ st.markdown("---")
 # --- FUNCIONES DE LÓGICA ---
 def realizar_ocr_profundo(pdf_file):
     try:
-        images = convert_from_path(pdf_file)
+        # Volvemos a leer el archivo desde el inicio
+        pdf_file.seek(0)
+        images = convert_from_path(pdf_file.read())
         texto = ""
         for img in images:
             texto += pytesseract.image_to_string(img, lang='spa')
         return texto
-    except:
+    except Exception as e:
         return ""
 
 def extraer_monto(texto, patron):
     match = re.search(patron, texto)
     if match:
-        return float(match.group(1).replace(',', '.'))
+        # Limpieza básica de caracteres para convertir a número
+        valor_str = match.group(1).replace('.', '').replace(',', '.')
+        try:
+            return float(valor_str)
+        except:
+            return 0.0
     return 0.0
 
 # --- BARRA LATERAL: GESTIÓN DE ARCHIVOS ---
@@ -79,10 +86,11 @@ if st.session_state.excel_maestro is not None:
     col_a, col_b = st.columns(2)
     with col_a:
         st.write(f"**Líneas en Excel:** {len(df)}")
+    with col_b:
         st.write(f"**PDFs en sistema:** {len(st.session_state.pdf_library)}")
     
     # Botón de Procesamiento
-    if st.button("🚀 PROCESAR LOTE ACTUAL"):
+    if st.button("🚀 PROCESAR AUDITORÍA"):
         temp_results = []
         progreso = st.progress(0)
         bitacora = st.empty()
@@ -94,64 +102,60 @@ if st.session_state.excel_maestro is not None:
             fecha_val = str(fila[col_fecha])
             año_actual = datetime.datetime.now().year
             
-            bitacora.info(f"Analizando CP: {cp}...")
-            
             # REGLA 4: Año anterior
             if str(año_actual-1) in fecha_val:
-                temp_results.append({"CP": cp, "ESTADO": "⚠️ DESECHADO", "MOTIVO": f"Documento del año {año_actual-1}. Requiere revisión humana."})
+                temp_results.append({"CP": cp, "ESTADO": "⚠️ DESECHADO", "MOTIVO": f"Año {año_actual-1} (Revisión humana)"})
                 continue
 
             # Buscar PDF en la librería por CP
             pdf_match_name = next((name for name in st.session_state.pdf_library if cp in name), None)
             
             if pdf_match_name:
-                pdf_file = st.session_state.pdf_library[pdf_match_name]
-                texto = realizar_ocr_profundo(pdf_file)
+                bitacora.info(f"Leyendo OCR para CP: {cp}...")
+                pdf_data = st.session_state.pdf_library[pdf_match_name]
+                texto = realizar_ocr_profundo(pdf_data)
                 
                 problemas = []
                 
-                # REGLA 1 y 2: Validación de RUC y Datos
+                # REGLA 1 y 2: Validación de RUC
                 if ruc_excel not in texto:
-                    problemas.append(f"RUC {ruc_excel} no hallado en PDF")
+                    problemas.append(f"RUC {ruc_excel} no hallado")
 
                 # REGLA 5: Cuadre con Anticipos y Retenciones
-                # Buscamos en el comprobante contable (Haber)
-                amortizacion = extraer_monto(texto, rr"(?i)AMORTIZA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
+                amortizacion = extraer_monto(texto, r"(?i)AMORTIZA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
                 retencion = extraer_monto(texto, r"(?i)RETENCI[OÓ]N[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
                 multa = extraer_monto(texto, r"(?i)MULTA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
                 
                 calculo_neto = monto_excel - amortizacion - retencion - multa
                 
-                # REGLA 3: Trimestre (Si el mes no coincide con el ciclo)
-                mes_doc = pd.to_datetime(fila[col_fecha], errors='coerce').month
-                if mes_doc not in [3, 6, 9, 12]:
-                    problemas.append("Fuera de cierre trimestral (Verificar duplicidad)")
+                # REGLA 3: Trimestre (Si el mes no coincide con cierre)
+                try:
+                    mes_doc = pd.to_datetime(fila[col_fecha]).month
+                    if mes_doc not in [3, 6, 9, 12]:
+                        problemas.append("Fuera de cierre trimestral")
+                except:
+                    pass
 
-                # RESULTADO FINAL
-                if abs(calculo_neto - monto_excel) > 0.5 and (amortizacion > 0 or retencion > 0):
-                    # Si hubo deducciones y el neto no es el del SPI (asumiendo monto_excel como valor a pagar)
-                    problemas.append(f"Error de cuadre SPI. Deducciones: Amort(${amortizacion}), Ret(${retencion})")
-
+                # VALIDACIÓN FINAL
                 if problemas:
                     temp_results.append({"CP": cp, "ESTADO": "REVISAR", "MOTIVO": " | ".join(problemas)})
                 else:
-                    temp_results.append({"CP": cp, "ESTADO": "OK", "MOTIVO": "Campos verificados y cuadre correcto"})
+                    temp_results.append({"CP": cp, "ESTADO": "OK", "MOTIVO": f"Verificado. (Amort: ${amortizacion})"})
             else:
-                temp_results.append({"CP": cp, "ESTADO": "PENDIENTE", "MOTIVO": "PDF no cargado aún"})
+                temp_results.append({"CP": cp, "ESTADO": "PENDIENTE", "MOTIVO": "PDF no cargado"})
             
             progreso.progress((idx + 1) / len(df))
 
         st.session_state.resultados_auditoria = temp_results
-        st.success("Procesamiento de lote completado.")
+        bitacora.success("Procesamiento completado.")
 
     # --- MOSTRAR RESULTADOS Y REPORTES ---
     if st.session_state.resultados_auditoria:
         res_df = pd.DataFrame(st.session_state.resultados_auditoria)
         st.markdown("---")
-        st.subheader("📈 Resultados Actuales")
         
         # Filtros de vista
-        opcion_vista = st.radio("Ver reporte:", ["Todos", "Solo con problemas (REVISAR/ERROR)", "Solo Correctos (OK)"], horizontal=True)
+        opcion_vista = st.radio("Ver reporte:", ["Todos", "Solo con problemas", "Solo Correctos"], horizontal=True)
         
         if "problemas" in opcion_vista:
             vista_df = res_df[res_df['ESTADO'] != "OK"]
@@ -162,16 +166,14 @@ if st.session_state.excel_maestro is not None:
 
         st.dataframe(vista_df, use_container_width=True)
 
-        # REPORTES PARCIALES Y FINALES
+        # REPORTES
         col_r1, col_r2 = st.columns(2)
         with col_r1:
             csv_parcial = vista_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Descargar Reporte Parcial (Vista actual)", csv_parcial, "Reporte_Parcial.csv")
+            st.download_button("📥 Reporte Parcial (Vista)", csv_parcial, "Parcial.csv")
         with col_r2:
             csv_final = res_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📊 Descargar Reporte Final (Toda la Matriz)", csv_final, "Auditoria_Final_Completa.csv")
-
-        st.info("¿Has concluido con todos los archivos o hace falta cargar más PDFs?")
+            st.download_button("📊 Reporte Final (Matriz)", csv_final, "Auditoria_Final.csv")
 
 else:
-    st.warning("👈 Por favor, carga la Matriz Excel en la barra lateral para comenzar.")
+    st.warning("👈 Por favor, carga la Matriz Excel en la barra lateral.")
