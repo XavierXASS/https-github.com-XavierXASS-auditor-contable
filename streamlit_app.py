@@ -7,7 +7,7 @@ import io
 import datetime
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Auditor Contable Xavier V3", layout="wide")
+st.set_page_config(page_title="Auditor Contable Xavier V4", layout="wide")
 
 if 'pdf_library' not in st.session_state:
     st.session_state.pdf_library = {} 
@@ -69,8 +69,17 @@ if excel_file is not None:
         status_text = st.empty()
 
         for idx, fila in df_maestro.iterrows():
-            cp = str(fila[c_cp]).strip()
-            ruc_ex = str(fila[c_ruc]).strip()
+            # LIMPIEZA DE DATOS EXCEL
+            cp = str(fila[c_cp]).strip().split('.')[0] # Quitar .0 del CP
+            
+            # QA: Limpieza estricta del RUC (quitar .0 y asegurar 13 dígitos)
+            try:
+                ruc_val = str(fila[c_ruc]).strip()
+                if '.' in ruc_val: ruc_val = ruc_val.split('.')[0]
+                ruc_ex = ruc_val.zfill(13) # Rellena con ceros a la izquierda si faltan
+            except:
+                ruc_ex = ""
+
             monto_ex = fila[c_total]
             fecha_ex = str(fila[c_fecha])
             
@@ -88,16 +97,14 @@ if excel_file is not None:
                 texto = realizar_ocr_profundo(st.session_state.pdf_library[pdf_name])
                 fallos = []
                 
-                # REGLA 1 y 2: Validación RUC
+                # REGLA 1 y 2: Validación RUC (Sin el .0)
                 if ruc_ex not in texto:
-                    fallos.append(f"RUC {ruc_ex} no encontrado")
+                    fallos.append(f"RUC {ruc_ex} no encontrado en documentos")
 
                 # REGLA 5: Deducciones
                 amort = extraer_monto(texto, r"(?i)AMORTIZA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
                 ret = extraer_monto(texto, r"(?i)RETENCI[OÓ]N[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
                 multa = extraer_monto(texto, r"(?i)MULTA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
-                
-                neto_calc = monto_ex - amort - ret - multa
                 
                 # REGLA 3: Trimestre
                 try:
@@ -124,7 +131,6 @@ if excel_file is not None:
         st.subheader("📊 Resultados de la Auditoría")
         st.dataframe(res_df, use_container_width=True)
 
-        # EXPORTACIÓN A EXCEL REAL (.xlsx)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             res_df.to_excel(writer, index=False, sheet_name='Reporte')
