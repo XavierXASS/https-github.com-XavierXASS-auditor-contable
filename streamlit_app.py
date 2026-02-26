@@ -1,95 +1,80 @@
 import streamlit as st
 import pandas as pd
-import pytesseract
-from pdf2image import convert_from_bytes
+import google.generativeai as genai
 import re
 import io
-from PIL import Image, ImageOps
+import time
+from pdf2image import convert_from_bytes
+from PIL import Image
 
-st.set_page_config(page_title="Auditoría Integral Xavier PRO", layout="wide")
+# --- CONFIGURACIÓN DE IA ---
+st.set_page_config(page_title="Auditoría IA Pro - Xavier", layout="wide")
 
-if 'maestro' not in st.session_state: st.session_state.maestro = None
-if 'procesados_nombres' not in st.session_state: st.session_state.procesados_nombres = set()
-
-st.title("🛡️ Sistema de Auditoría Xavier - EMAPAG & ÉPICO")
+st.title("🛡️ Centro de Auditoría con Inteligencia Artificial")
 st.markdown("---")
 
-def ocr_alta_resolucion(pdf_bytes):
-    try:
-        # Mantenemos DPI alto para no perder detalle en RUC y montos
-        images = convert_from_bytes(pdf_bytes, dpi=200)
-        texto_completo = ""
-        for img in images:
-            # Pre-procesamiento para escaneos: Grayscale + Autocontraste
-            img = ImageOps.grayscale(img)
-            img = ImageOps.autocontrast(img)
-            texto_completo += pytesseract.image_to_string(img, lang='spa')
-        return texto_completo.upper()
-    except Exception as e:
-        return f"ERROR_LECTURA: {str(e)}"
-
-def realizar_auditoria(texto, ruc_excel, cp_excel, anio_ref):
-    hallazgos = []
-    # 1. Identificación de Documentos por Cabeceras (EMAPAG/ÉPICO)
-    docs = {
-        "PAGO": ["COMPROBANTE DE PAGO", "ORDEN DE PAGO", "EGRESO"],
-        "CONTABLE": ["COMPROBANTE CONTABLE", "REGISTRO CONTABLE", "DIARIO"],
-        "FACTURA": ["FACTURA", "FACT.", "R.U.C."],
-        "RETENCION": ["RETENCION", "COMPROBANTE DE RETENCI"],
-        "SPI": ["ESTADO DE TRANSFERENCIA", "BANCO CENTRAL", "SOL VALDIVIA", "BCE"]
-    }
-    
-    encontrados = []
-    for doc_tipo, palabras in docs.items():
-        if any(p in texto for p in palabras):
-            encontrados.append(doc_tipo)
-
-    # 2. Limpieza de datos para cruce
-    texto_nums = re.sub(r'\D', '', texto)
-    ruc_clean = re.sub(r'\D', '', str(ruc_excel))
-    cp_clean = re.sub(r'\D', '', str(cp_excel))
-
-    # 3. Validaciones de QA
-    if cp_clean not in texto_nums:
-        return "🔍 REVISAR", f"El CP {cp_clean} no aparece en el texto del PDF."
-    
-    if ruc_clean not in texto_nums:
-        hallazgos.append("RUC no coincide")
-    
-    if "2026" in texto: hallazgos.append("Alerta: Año 2026")
-    if "2024" in texto and str(anio_ref) == "2025": hallazgos.append("Año anterior (2024)")
-
-    # 4. Verificación de piezas faltantes
-    faltantes = set(docs.keys()) - set(encontrados)
-    
-    # 5. Amortización (Regla 5)
-    amort = 0.0
-    m = re.search(r"AMORTIZA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})", texto)
-    if m:
-        try: amort = float(m.group(1).replace('.', '').replace(',', '.'))
-        except: pass
-
-    status = "✅ OK" if not hallazgos and not faltantes else "🔍 REVISAR"
-    resumen = f"Docs: {', '.join(encontrados)}. "
-    if faltantes: resumen += f"Faltan: {', '.join(faltantes)}. "
-    if hallazgos: resumen += " | ALERTAS: " + " ; ".join(hallazgos)
-    if amort > 0: resumen += f" | Anticipo: ${amort}"
-    
-    return status, resumen
-
-# --- INTERFAZ ---
+# Barra lateral para la llave y configuración
 with st.sidebar:
-    st.header("⚙️ Configuración")
-    entidad = st.selectbox("Entidad a Auditar", ["EMAPAG", "ÉPICO"])
-    anio_f = st.number_input("Año de Revisión", value=2025)
-    st.markdown("---")
-    if st.button("🗑️ Limpiar Lote de PDFs"):
-        st.session_state.procesados_nombres = set()
-        st.rerun()
+    st.header("🔑 Acceso")
+    # Usamos la llave que proporcionaste
+    api_key_input = st.text_input("Google API Key:", value="AIzaSyCNYo_YWsGsArXjAzOk0_CY1ISiw83t1yI", type="password")
+    
+    st.header("⚙️ Contexto")
+    entidad = st.selectbox("Entidad:", ["EMAPAG", "ÉPICO"])
+    anio_ref = st.number_input("Año de revisión:", value=2025)
+    
     if st.button("🚨 Reiniciar Todo"):
         st.session_state.maestro = None
-        st.session_state.procesados_nombres = set()
         st.rerun()
+
+# Configurar la IA
+if api_key_input:
+    genai.configure(api_key=api_key_input)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+
+# --- MEMORIA DE SESIÓN ---
+if 'maestro' not in st.session_state: st.session_state.maestro = None
+
+# --- LÓGICA DE AUDITORÍA PERICIAL CON IA ---
+def auditar_pericial(pdf_bytes, cp, ruc, total_ex, anio_ref, entidad_nombre):
+    try:
+        # Convertimos todas las páginas del PDF para que la IA vea todo el expediente
+        images = convert_from_bytes(pdf_bytes, dpi=100)
+        
+        # Preparamos las imágenes para Gemini
+        img_payload = []
+        for img in images[:5]: # Enviamos las primeras 5 páginas (suficiente para los 5 docs)
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG')
+            img_payload.append(Image.open(buf))
+        
+        prompt = f"""
+        Eres un auditor forense contable en Ecuador trabajando para {entidad_nombre}. 
+        Analiza este expediente (varias páginas) referente al CP {cp} y RUC/Cédula {ruc}.
+
+        OBJETIVO:
+        1. Identifica el trámite: ¿Es Pago a Proveedor, Nómina, Planilla IESS/SRI, Liquidación o Comisión Bancaria?
+        2. Verifica presencia de piezas: Comprobante de Pago, Contable, Factura/Nómina, Retención y SPI (Sol Valdivia/BCE).
+        3. Errores Críticos: Busca fechas del 2026 o del año anterior (buscamos {anio_ref}).
+        4. Validación Numérica: Extrae el valor pagado en el SPI y compáralo con el total del trámite menos retenciones/amortizaciones. El valor en Excel es {total_ex}.
+
+        RESPONDE EXACTAMENTE ASÍ:
+        TIPO: [Tipo de trámite detectado]
+        ESTADO: [OK o REVISAR]
+        DETALLE: [Lista breve de hallazgos, piezas faltantes o errores de fecha/RUC]
+        """
+        
+        response = model.generate_content([prompt] + img_payload)
+        res_text = response.text.upper()
+        
+        # Parseo de respuesta
+        estado = "✅ OK" if "ESTADO: OK" in res_text else "🔍 REVISAR"
+        tipo = res_text.split("TIPO:")[1].split("\n")[0].strip() if "TIPO:" in res_text else "DESCONOCIDO"
+        detalle = res_text.split("DETALLE:")[1].strip() if "DETALLE:" in res_text else res_text
+        
+        return tipo, estado, detalle
+    except Exception as e:
+        return "ERROR", "ERROR IA", str(e)
 
 # --- FLUJO DE CARGA ---
 col_ex, col_pdf = st.columns(2)
@@ -99,62 +84,65 @@ with col_ex:
     file_ex = st.file_uploader("Subir Maestro", type=["xlsx"])
     if file_ex and st.session_state.maestro is None:
         st.session_state.maestro = pd.read_excel(file_ex)
-        for c in ['REVISADO', 'ESTADO_AUDITORIA', 'OBSERVACION_TECNICA']:
-            if c not in st.session_state.maestro.columns:
-                st.session_state.maestro[c] = "PENDIENTE"
+        for c in ['TIPO_TRAMITE', 'ESTADO_IA', 'INFORME_DETALLADO', 'REVISADO']:
+            if c not in st.session_state.maestro.columns: st.session_state.maestro[c] = "PENDIENTE"
         st.rerun()
 
 with col_pdf:
-    st.subheader("2. Documentos PDF")
-    archivos_pdfs = st.file_uploader("Cargar PDFs (Máx 10 por vez)", type=["pdf"], accept_multiple_files=True)
+    st.subheader("2. Expedientes PDF")
+    pdfs = st.file_uploader("Sube los archivos (Lotes de 5 a 10)", type=["pdf"], accept_multiple_files=True)
 
-if st.session_state.maestro is not None and archivos_pdfs:
-    if st.button("🚀 INICIAR AUDITORÍA"):
-        df = st.session_state.maestro
-        c_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
-        c_ruc = next((c for c in df.columns if "RUC" in str(c).upper()), None)
-        
+# --- EJECUCIÓN ---
+if st.session_state.maestro is not None and api_key_input:
+    df = st.session_state.maestro
+    
+    # Identificar columnas
+    c_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
+    c_ruc = next((c for c in df.columns if "RUC" in str(c).upper()), None)
+    c_total = next((c for c in df.columns if "TOTAL" in str(c).upper()), None)
+
+    if pdfs and st.button("🚀 INICIAR AUDITORÍA PERICIAL"):
         status_msg = st.empty()
         progreso = st.progress(0)
-
-        for i, pdf in enumerate(archivos_pdfs):
-            if pdf.name not in st.session_state.procesados_nombres:
-                status_msg.info(f"Analizando: {pdf.name}...")
+        
+        for i, pdf in enumerate(pdfs):
+            # Extraer número del nombre del archivo para mapear
+            num_match = re.search(r'\d+', pdf.name)
+            if num_match:
+                cp_id = num_match.group()
+                idx_list = df[df[c_cp].astype(str).str.contains(cp_id)].index
                 
-                # Leemos el PDF
-                texto_pdf = ocr_alta_resolucion(pdf.read())
-                
-                # BUSCADOR INTELIGENTE: ¿A qué fila del Excel pertenece este PDF?
-                # Buscamos todos los CP del Excel dentro del texto del PDF
-                fila_encontrada = None
-                for idx, fila in df.iterrows():
-                    cp_buscado = str(fila[c_cp]).strip().split('.')[0]
-                    if cp_buscado in re.sub(r'\D', '', texto_pdf):
-                        fila_encontrada = idx
-                        break
-                
-                if fila_encontrada is not None:
-                    ruc_val = df.at[fila_encontrada, c_ruc]
-                    cp_val = df.at[fila_encontrada, c_cp]
+                if not idx_list.empty:
+                    idx = idx_list[0]
+                    status_msg.info(f"IA analizando visualmente el CP {cp_id}...")
                     
-                    st_res, ob_res = realizar_auditoria(texto_pdf, ruc_val, cp_val, anio_f)
+                    tipo, est, det = auditar_pericial(
+                        pdf.read(), 
+                        cp_id, 
+                        df.at[idx, c_ruc], 
+                        df.at[idx, c_total], 
+                        anio_ref, 
+                        entidad
+                    )
                     
-                    df.at[fila_encontrada, 'ESTADO_AUDITORIA'] = st_res
-                    df.at[fila_encontrada, 'OBSERVACION_TECNICA'] = ob_res
-                    df.at[fila_encontrada, 'REVISADO'] = "SÍ"
-                    st.session_state.procesados_nombres.add(pdf.name)
-                else:
-                    st.warning(f"El archivo {pdf.name} no contiene ningún CP válido del Excel.")
-                
-                progreso.progress((i + 1) / len(archivos_pdfs))
+                    df.at[idx, 'TIPO_TRAMITE'] = tipo
+                    df.at[idx, 'ESTADO_IA'] = est
+                    df.at[idx, 'INFORME_DETALLADO'] = det
+                    df.at[idx, 'REVISADO'] = "SÍ"
+                    time.sleep(1) # Respetar límites de API gratuita
+            
+            progreso.progress((i + 1) / len(pdfs))
         
         st.session_state.maestro = df
-        status_msg.success("Auditoría terminada para este lote.")
+        status_msg.success("Auditoría terminada.")
 
     st.dataframe(st.session_state.maestro, use_container_width=True)
     
-    # Exportar
+    # Descarga
     out = io.BytesIO()
-    with pd.ExcelWriter(out, engine='openpyxl') as writer:
-        st.session_state.maestro.to_excel(writer, index=False)
-    st.download_button("📥 DESCARGAR MAESTRO ACTUALIZADO", out.getvalue(), "Auditoria_Final.xlsx")
+    with pd.ExcelWriter(out, engine='openpyxl') as w:
+        st.session_state.maestro.to_excel(w, index=False)
+    st.download_button("📥 DESCARGAR AUDITORÍA COMPLETA", out.getvalue(), f"Auditoria_IA_{entidad}.xlsx")
+
+else:
+    st.info("👈 Por favor, carga el Excel y verifica tu API Key para empezar.")
