@@ -3,5 +3,5 @@ pandas
 openpyxl
 pytesseract
 pdf2image
-google-generativeai==0.8.3
+google-generativeai>=0.8.0
 Pillow
