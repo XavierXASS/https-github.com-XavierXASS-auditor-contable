@@ -6,126 +6,116 @@ import re
 import io
 from PIL import Image, ImageOps
 
-st.set_page_config(page_title="Auditoría Pro Xavier", layout="wide")
+st.set_page_config(page_title="Auditoría Xavier PRO", layout="wide")
 
-if 'maestro' not in st.session_state: st.session_state.maestro = None
-if 'pdf_cache' not in st.session_state: st.session_state.pdf_cache = {}
+# Solo guardamos el progreso del Excel, NO los PDFs (para no saturar la memoria)
+if 'df_maestro' not in st.session_state: st.session_state.df_maestro = None
 
-st.title("🛡️ Auditoría Inteligente de Comprobantes")
+st.title("🛡️ Auditoría Inteligente (Versión Estable)")
 st.markdown("---")
 
-def analizar_pdf_integral(pdf_file, cp_buscado, ruc_buscado, anio_ref):
+def procesar_un_pdf(pdf_file, cp_buscado, ruc_buscado, anio_ref):
     try:
-        pdf_file.seek(0)
-        # Bajamos a 150 DPI para que sea más rápido y no sature la memoria
-        images = convert_from_path(pdf_file.read(), dpi=150)
-        texto_completo = ""
+        # Leemos con resolución moderada para evitar "Network Error"
+        images = convert_from_path(pdf_file, dpi=130) 
+        texto_acumulado = ""
         for img in images:
-            texto_completo += pytesseract.image_to_string(ImageOps.grayscale(img), lang='spa').upper()
+            texto_acumulado += pytesseract.image_to_string(ImageOps.grayscale(img), lang='spa').upper()
         
         hallazgos = []
-        documentos_detectados = []
+        # Identificar documentos
+        if "FACTURA" in texto_acumulado: hallazgos.append("FACTURA")
+        if "RETENCI" in texto_acumulado: hallazgos.append("RETENCION")
+        if "TRANSFERENCIA" in texto_acumulado: hallazgos.append("SPI")
         
-        mapeo_docs = {
-            "COMPROBANTE DE PAGO": "PAGO",
-            "COMPROBANTE CONTABLE": "CONTABLE",
-            "FACTURA": "FACTURA",
-            "RETENCIÓN": "RETENCIÓN",
-            "ESTADO DE TRANSFERENCIA": "SPI"
-        }
-        for clave, nombre in mapeo_docs.items():
-            if clave in texto_completo: documentos_detectados.append(nombre)
-
-        # Limpieza de CP y RUC para búsqueda
-        cp_clean = re.sub(r'\D', '', str(cp_buscado))
+        # Limpieza para validación
+        texto_limpio = re.sub(r'\D', '', texto_acumulado)
         ruc_clean = re.sub(r'\D', '', str(ruc_buscado))
-        texto_clean = re.sub(r'\D', '', texto_completo)
+        cp_clean = re.sub(r'\D', '', str(cp_buscado))
 
-        if cp_clean not in texto_clean:
-            return "🔍 REVISAR", f"CP {cp_clean} no hallado en el texto del PDF"
-
-        if ruc_clean not in texto_clean:
-            hallazgos.append("RUC no hallado")
-
-        if "2026" in texto_completo: hallazgos.append("Alerta Fecha: 2026")
-        if "2024" in texto_completo and anio_ref == 2025: hallazgos.append("Año anterior (2024)")
-
-        faltantes = set(mapeo_docs.values()) - set(documentos_detectados)
-        status = "✅ OK" if not hallazgos and not faltantes else "🔍 REVISAR"
+        if cp_clean not in texto_limpio:
+            return "🔍 REVISAR", "CP no hallado en el contenido del PDF"
         
-        obs = f"Docs: {','.join(documentos_detectados)}. "
-        if faltantes: obs += f"Faltan: {','.join(faltantes)}. "
-        if hallazgos: obs += f"Alertas: {'; '.join(hallazgos)}"
+        alertas = []
+        if ruc_clean not in texto_limpio: alertas.append("RUC no coincide")
+        if "2026" in texto_acumulado: alertas.append("Fecha dice 2026")
         
+        status = "✅ OK" if not alertas else "🔍 REVISAR"
+        obs = f"Detectado: {', '.join(hallazgos)}. " + " | ".join(alertas)
         return status, obs
     except Exception as e:
-        return "ERROR OCR", f"Error técnico: {str(e)}"
+        return "ERROR", f"Fallo de lectura: {str(e)}"
 
+# --- INTERFAZ ---
 with st.sidebar:
-    st.header("⚙️ Configuración")
-    entidad = st.selectbox("Entidad", ["EMAPAG", "ÉPICO"])
-    anio_fiscal = st.number_input("Año de Revisión", value=2025)
+    st.header("1. Configuración")
+    entidad = st.selectbox("Empresa", ["EMAPAG", "ÉPICO"])
+    anio_fiscal = st.number_input("Año", value=2025)
     
-    file_excel = st.file_uploader("1. Cargar Matriz Excel", type=["xlsx"])
+    st.header("2. Cargar Maestro")
+    file_excel = st.file_uploader("Subir Excel", type=["xlsx"])
     if file_excel:
-        if st.session_state.maestro is None:
-            st.session_state.maestro = pd.read_excel(file_excel)
-            if 'ESTADO_REVISION' not in st.session_state.maestro.columns:
-                st.session_state.maestro['ESTADO_REVISION'] = "PENDIENTE"
-                st.session_state.maestro['OBSERVACIONES_TECNICAS'] = ""
+        if st.session_state.df_maestro is None:
+            st.session_state.df_maestro = pd.read_excel(file_excel)
+            for col in ['AUDITADO', 'ESTADO', 'OBSERVACION']:
+                if col not in st.session_state.df_maestro.columns:
+                    st.session_state.df_maestro[col] = "NO"
 
-    files_pdf = st.file_uploader("2. Cargar PDFs (En lotes de 20 para evitar errores)", type=["pdf"], accept_multiple_files=True)
-    if files_pdf:
-        for f in files_pdf: 
-            st.session_state.pdf_cache[f.name.upper()] = f
-    
-    st.write(f"Total PDFs en memoria: {len(st.session_state.pdf_cache)}")
-
-    if st.button("🗑️ Resetear Todo"):
-        st.session_state.maestro = None
-        st.session_state.pdf_cache = {}
+    if st.button("🗑️ Reiniciar Todo"):
+        st.session_state.df_maestro = None
         st.rerun()
 
-if st.session_state.maestro is not None:
-    df = st.session_state.maestro
-    c_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
-    c_ruc = next((c for c in df.columns if "RUC" in str(c).upper()), None)
+# --- CUERPO ---
+if st.session_state.df_maestro is not None:
+    df = st.session_state.df_maestro
+    
+    st.subheader(f"Auditoría {entidad} {anio_fiscal}")
+    st.info("Para evitar errores de red, sube los PDFs en grupos de máximo 15 archivos.")
+    
+    # El cargador de PDF ahora está en el cuerpo principal
+    archivos_subidos = st.file_uploader("Cargar PDFs a procesar", type=["pdf"], accept_multiple_files=True)
 
-    if st.button("🚀 PROCESAR FILAS PENDIENTES"):
+    if archivos_subidos and st.button("🚀 PROCESAR ESTE LOTE"):
+        # Mapear PDFs por número encontrado en el nombre (opcional) o por contenido
         progreso = st.progress(0)
-        status_msg = st.empty()
         
-        for idx, fila in df.iterrows():
-            if fila['ESTADO_REVISION'] in ["✅ OK", "🔍 REVISAR", "❌ DESECHADO"]:
-                continue
+        for i, pdf in enumerate(archivos_subidos):
+            # Intentar extraer el CP del nombre del archivo para saber qué fila auditar
+            # Buscamos el primer número largo en el nombre del archivo
+            cp_en_nombre = re.search(r'\d+', pdf.name)
+            if cp_en_nombre:
+                cp_detectado = cp_en_nombre.group()
                 
-            cp_val = str(fila[c_cp]).strip().split('.')[0]
-            ruc_val = str(fila[c_ruc]).strip().split('.')[0]
+                # Buscar esta fila en el maestro
+                # (Buscamos en la columna que contenga "PAGO" o "CP")
+                col_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
+                
+                idx_fila = df[df[col_cp].astype(str).str.contains(cp_detectado)].index
+                
+                if not idx_fila.empty:
+                    idx = idx_fila[0]
+                    ruc_obj = df.at[idx, next(c for c in df.columns if "RUC" in str(c).upper())]
+                    
+                    # Analizar
+                    st.write(f"Procesando: {pdf.name}...")
+                    status, obs = procesar_un_pdf(pdf, cp_detectado, ruc_obj, anio_fiscal)
+                    
+                    df.at[idx, 'ESTADO'] = status
+                    df.at[idx, 'OBSERVACION'] = obs
+                    df.at[idx, 'AUDITADO'] = "SÍ"
             
-            status_msg.text(f"Buscando PDF para CP {cp_val}...")
-            
-            pdf_encontrado = None
-            for nombre, contenido in st.session_state.pdf_cache.items():
-                if cp_val in nombre:
-                    pdf_encontrado = contenido
-                    break
-            
-            if pdf_encontrado:
-                res_status, res_obs = analizar_pdf_integral(pdf_encontrado, cp_val, ruc_val, anio_fiscal)
-                df.at[idx, 'ESTADO_REVISION'] = res_status
-                df.at[idx, 'OBSERVACIONES_TECNICAS'] = res_obs
-            else:
-                df.at[idx, 'OBSERVACIONES_TECNICAS'] = "PDF no cargado"
-
-            progreso.progress((idx + 1) / len(df))
+            progreso.progress((i + 1) / len(archivos_subidos))
         
-        st.session_state.maestro = df
-        status_msg.success("Procesamiento terminado.")
+        st.session_state.df_maestro = df
+        st.success("Lote procesado. Puedes descargar el avance o subir más archivos.")
 
     st.dataframe(df, use_container_width=True)
 
+    # Descarga
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
-    
-    st.download_button("📥 DESCARGAR MAESTRO ACTUALIZADO", output.getvalue(), file_name=f"Auditoria_{entidad}.xlsx")
+    st.download_button("📥 Descargar Maestro Auditado", output.getvalue(), f"Auditoria_{entidad}.xlsx")
+
+else:
+    st.warning("Carga el archivo Excel en la izquierda para comenzar.")
