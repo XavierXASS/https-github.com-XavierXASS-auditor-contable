@@ -3,5 +3,5 @@ pandas
 openpyxl
 pytesseract
 pdf2image
-opencv-python-headless
+google-generativeai
 Pillow
