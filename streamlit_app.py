@@ -4,144 +4,140 @@ import pytesseract
 from pdf2image import convert_from_bytes
 import re
 import io
+import zipfile
 from PIL import Image, ImageOps
 
-st.set_page_config(page_title="Auditoría Xavier PRO", layout="wide")
+st.set_page_config(page_title="Auditoría Integral Xavier", layout="wide")
 
-# --- MEMORIA DE SESIÓN ---
-if 'df_maestro' not in st.session_state: 
-    st.session_state.df_maestro = None
-if 'pdf_uploader_key' not in st.session_state:
-    st.session_state.pdf_uploader_key = 0
+# --- MEMORIA DE SESIÓN (Crucial para no re-instalar nada) ---
+if 'maestro' not in st.session_state: st.session_state.maestro = None
+if 'procesados' not in st.session_state: st.session_state.procesados = set()
 
-st.title("🛡️ Sistema de Auditoría Xavier - V10 Estable")
+st.title("🛡️ Sistema de Auditoría Xavier - Versión Oficina (ZIP-Stable)")
 st.markdown("---")
 
-def procesar_un_pdf(pdf_file, cp_buscado, ruc_buscado, anio_ref):
+def realizar_ocr(pdf_bytes):
     try:
-        # Volvemos al inicio del archivo para leerlo
-        pdf_file.seek(0)
-        archivo_bytes = pdf_file.read()
-        
-        # CORRECCIÓN TÉCNICA: Usamos convert_from_bytes para Streamlit Cloud
-        images = convert_from_bytes(archivo_bytes, dpi=130) 
-        
-        texto_acumulado = ""
+        # DPI 120 para velocidad y estabilidad en red de oficina
+        images = convert_from_bytes(pdf_bytes, dpi=120)
+        texto = ""
         for img in images:
-            texto_acumulado += pytesseract.image_to_string(ImageOps.grayscale(img), lang='spa').upper()
-        
-        # Identificación de documentos presentes
-        docs_encontrados = []
-        if "PAGO" in texto_acumulado or "COMPROBANTE DE PAGO" in texto_acumulado: docs_encontrados.append("PAGO")
-        if "CONTABLE" in texto_acumulado or "COMPROBANTE CONTABLE" in texto_acumulado: docs_encontrados.append("CONTABLE")
-        if "FACTURA" in texto_acumulado: docs_encontrados.append("FACTURA")
-        if "RETENCI" in texto_acumulado: docs_encontrados.append("RETENCION")
-        if "ESTADO DE TRANSFERENCIA" in texto_acumulado or "BCE" in texto_acumulado: docs_encontrados.append("SPI")
-        
-        # Limpieza de datos para comparación
-        texto_solo_numeros = re.sub(r'\D', '', texto_acumulado)
-        cp_clean = re.sub(r'\D', '', str(cp_buscado))
-        ruc_clean = re.sub(r'\D', '', str(ruc_buscado))
+            texto += pytesseract.image_to_string(ImageOps.grayscale(img), lang='spa').upper()
+        return texto
+    except: return ""
 
-        # Validación 1: ¿Este PDF pertenece al CP buscado?
-        # Buscamos el CP con fronteras para que sea exacto (evita que 340 encuentre 34)
-        if cp_clean not in texto_solo_numeros:
-            return "🔍 REVISAR", f"CP {cp_clean} no hallado en el texto del PDF"
-        
-        # Validación 2: Errores reales
-        alertas = []
-        if ruc_clean not in texto_solo_numeros: alertas.append("RUC no coincide")
-        if "2026" in texto_acumulado: alertas.append("Fecha dice 2026")
-        if "2024" in texto_acumulado and str(anio_ref) == "2025": alertas.append("Documento de 2024")
-        
-        # Validación 3: Piezas faltantes
-        obligatorios = ["PAGO", "CONTABLE", "FACTURA", "RETENCION", "SPI"]
-        faltantes = [d for d in obligatorios if d not in docs_encontrados]
-        
-        status = "✅ OK" if not alertas and not faltantes else "🔍 REVISAR"
-        obs = f"Docs: {', '.join(docs_encontrados)}. "
-        if faltantes: obs += f"Faltan: {', '.join(faltantes)}. "
-        if alertas: obs += " | Alertas: " + " ; ".join(alertas)
-        
-        return status, obs
-    except Exception as e:
-        return "ERROR", f"Fallo al procesar: {str(e)[:50]}"
+def auditar_contenido(texto, cp, ruc, anio_ref):
+    hallazgos = []
+    docs = []
+    
+    # Identificación de Cabeceras (Tu requerimiento)
+    if "PAGO" in texto or "COMPROBANTE DE PAGO" in texto: docs.append("PAGO")
+    if "CONTABLE" in texto: docs.append("CONTABLE")
+    if "FACTURA" in texto: docs.append("FACTURA")
+    if "RETENCI" in texto: docs.append("RETENCION")
+    if "TRANSFERENCIA" in texto or "BCE" in texto or "ESTADO DE" in texto: docs.append("SPI (Sol Valdivia)")
 
-# --- AREA DE CARGA ---
-col_ex, col_pdf = st.columns(2)
+    # Limpieza para búsqueda
+    t_clean = re.sub(r'\D', '', texto)
+    cp_clean = re.sub(r'\D', '', str(cp))
+    ruc_clean = re.sub(r'\D', '', str(ruc))
 
-with col_ex:
-    st.subheader("1. Matriz Excel")
-    file_excel = st.file_uploader("Subir Maestro", type=["xlsx"])
-    if file_excel and st.session_state.df_maestro is None:
-        st.session_state.df_maestro = pd.read_excel(file_excel)
-        for col in ['AUDITADO', 'ESTADO_REVISION', 'OBSERVACION']:
-            if col not in st.session_state.df_maestro.columns:
-                st.session_state.df_maestro[col] = "PENDIENTE"
+    # Reglas de QA
+    if cp_clean not in t_clean: return "🔍 REVISAR", "CP no hallado en el documento"
+    if ruc_clean not in t_clean: hallazgos.append("RUC no coincide")
+    if "2026" in texto: hallazgos.append("Error año: Dice 2026")
+    if "2024" in texto and str(anio_ref) == "2025": hallazgos.append("Documento año anterior")
+    
+    obligatorios = ["PAGO", "CONTABLE", "FACTURA", "RETENCION", "SPI (Sol Valdivia)"]
+    faltantes = [d for d in obligatorios if d not in docs]
+
+    # Amortización (Regla 5)
+    amort = 0.0
+    m = re.search(r"AMORTIZA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})", texto)
+    if m: amort = float(m.group(1).replace('.', '').replace(',', '.'))
+
+    status = "✅ OK" if not hallazgos and not faltantes else "🔍 REVISAR"
+    obs = f"Docs: {', '.join(docs)}. "
+    if faltantes: obs += f"Faltan: {', '.join(faltantes)}. "
+    if hallazgos: obs += " | Alertas: " + " ; ".join(hallazgos)
+    if amort > 0: obs += f" | Anticipo: ${amort}"
+    
+    return status, obs
+
+# --- BARRA LATERAL ---
+with st.sidebar:
+    st.header("1. Configuración")
+    entidad = st.selectbox("Entidad", ["EMAPAG", "ÉPICO"])
+    anio_f = st.number_input("Año Fiscal", value=2025)
+    
+    st.markdown("---")
+    # Botón 1: Borrar PDFs procesados
+    if st.button("🗑️ Limpiar Lote de PDFs"):
+        st.session_state.procesados = set()
+        st.success("Lote limpio. El Excel se mantiene.")
+    
+    # Botón 2: Borrar TODO
+    if st.button("🚨 Reiniciar TODO (Borrar Excel)"):
+        st.session_state.maestro = None
         st.rerun()
 
-with col_pdf:
-    st.subheader("2. Comprobantes PDF")
-    archivos_lote = st.file_uploader(
-        "Cargar lotes de PDFs", 
-        type=["pdf"], 
-        accept_multiple_files=True,
-        key=f"upl_{st.session_state.pdf_uploader_key}"
-    )
+# --- CARGA DE ARCHIVOS ---
+col1, col2 = st.columns(2)
+with col1:
+    ex_file = st.file_uploader("Subir Matriz Maestro", type=["xlsx"])
+    if ex_file and st.session_state.maestro is None:
+        st.session_state.maestro = pd.read_excel(ex_file)
+        for c in ['ESTADO', 'OBSERVACION', 'REVISADO']:
+            if c not in st.session_state.maestro.columns: st.session_state.maestro[c] = "PENDIENTE"
 
-st.markdown("---")
+with col2:
+    zip_file = st.file_uploader("Subir PDFs en archivo ZIP (Recomendado)", type=["zip", "pdf"], accept_multiple_files=True)
 
-if st.session_state.df_maestro is not None:
-    df = st.session_state.df_maestro
-    
-    # Identificar columnas
-    c_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
-    c_ruc = next((c for c in df.columns if "RUC" in str(c).upper()), None)
+# --- PROCESAMIENTO ---
+if st.session_state.maestro is not None and zip_file:
+    if st.button("🚀 INICIAR AUDITORÍA"):
+        df = st.session_state.maestro
+        c_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
+        c_ruc = next((c for c in df.columns if "RUC" in str(c).upper()), None)
+        
+        # Procesar si es ZIP o lista de PDFs
+        lista_archivos = []
+        if isinstance(zip_file, list):
+            lista_archivos = zip_file
+        else:
+            # Si es un solo ZIP, extraemos en memoria
+            with zipfile.ZipFile(zip_file) as z:
+                for name in z.namelist():
+                    if name.endswith(".pdf"):
+                        lista_archivos.append((name, z.read(name)))
 
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        if st.button("🚀 INICIAR AUDITORÍA"):
-            if not archivos_lote:
-                st.error("Carga PDFs primero.")
-            else:
-                progreso = st.progress(0)
-                status_msg = st.empty()
-                for i, pdf in enumerate(archivos_lote):
-                    # Buscar CP en el nombre del archivo
-                    match_num = re.search(r'\d+', pdf.name)
-                    if match_num:
-                        cp_archivo = match_num.group()
-                        # Buscar coincidencia exacta en el Excel
-                        # Convertimos a string y quitamos .0 para asegurar match
-                        idx_list = df[df[c_cp].astype(str).str.split('.').str[0] == cp_archivo].index
-                        
-                        if not idx_list.empty:
-                            idx = idx_list[0]
-                            ruc_obj = df.at[idx, c_ruc]
-                            status_msg.info(f"Analizando CP {cp_archivo}...")
-                            res_status, res_obs = procesar_un_pdf(pdf, cp_archivo, ruc_obj, 2025)
-                            
-                            df.at[idx, 'ESTADO_REVISION'] = res_status
-                            df.at[idx, 'OBSERVACION'] = res_obs
-                            df.at[idx, 'AUDITADO'] = "SÍ"
-                    progreso.progress((i + 1) / len(archivos_lote))
-                st.session_state.df_maestro = df
-                status_msg.success("Lote terminado.")
-    
-    with c2:
-        if st.button("🗑️ LIMPIAR PDFs (Mantener Excel)"):
-            st.session_state.pdf_uploader_key += 1
-            st.rerun()
+        progreso = st.progress(0)
+        status_msg = st.empty()
+
+        for i, item in enumerate(lista_archivos):
+            name = item.name if hasattr(item, 'name') else item[0]
+            content = item.read() if hasattr(item, 'read') else item[1]
             
-    with c3:
-        if st.button("🚨 BORRAR TODO"):
-            st.session_state.df_maestro = None
-            st.session_state.pdf_uploader_key += 1
-            st.rerun()
+            num_cp = re.search(r'\d+', name)
+            if num_cp:
+                cp_id = num_cp.group()
+                idx_f = df[df[c_cp].astype(str).str.contains(cp_id)].index
+                if not idx_f.empty:
+                    idx = idx_f[0]
+                    status_msg.info(f"Procesando: {name}...")
+                    res_st, res_ob = auditar_contenido(realizar_ocr(content), cp_id, df.at[idx, c_ruc], anio_f)
+                    df.at[idx, 'ESTADO'] = res_st
+                    df.at[idx, 'OBSERVACION'] = res_ob
+                    df.at[idx, 'REVISADO'] = "SÍ"
+            progreso.progress((i + 1) / len(lista_archivos))
+        
+        st.session_state.maestro = df
+        status_msg.success("Lote terminado.")
 
-    st.dataframe(st.session_state.df_maestro, use_container_width=True)
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        st.session_state.df_maestro.to_excel(writer, index=False)
-    st.download_button("📥 DESCARGAR EXCEL", output.getvalue(), "Auditoria_Final.xlsx")
+    st.dataframe(st.session_state.df_maestro if 'df_maestro' in st.session_state else st.session_state.maestro, use_container_width=True)
+    
+    # Exportar
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine='openpyxl') as w:
+        st.session_state.maestro.to_excel(w, index=False)
+    st.download_button("📥 Descargar Avance Auditoría", out.getvalue(), "Maestro_Auditado.xlsx")
