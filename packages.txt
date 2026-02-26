@@ -1,0 +1,6 @@
+code
+Text
+tesseract-ocr
+tesseract-ocr-spa
+libtesseract-dev
+poppler-utils
