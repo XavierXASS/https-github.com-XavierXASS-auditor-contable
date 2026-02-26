@@ -6,174 +6,134 @@ import re
 import io
 import datetime
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Auditor Contable Xavier V2", layout="wide")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Auditor Contable Xavier V3", layout="wide")
 
-# --- MEMORIA DE LA SESIÓN (Mantiene archivos y resultados) ---
 if 'pdf_library' not in st.session_state:
     st.session_state.pdf_library = {} 
 if 'resultados_auditoria' not in st.session_state:
     st.session_state.resultados_auditoria = []
-if 'excel_maestro' not in st.session_state:
-    st.session_state.excel_maestro = None
 
-st.title("🛡️ Centro de Gestión de Auditoría Integral")
+st.title("🛡️ Sistema de Auditoría Integral Xavier")
 st.markdown("---")
 
-# --- FUNCIONES DE LÓGICA ---
 def realizar_ocr_profundo(pdf_file):
     try:
-        # Volvemos a leer el archivo desde el inicio
         pdf_file.seek(0)
         images = convert_from_path(pdf_file.read())
         texto = ""
         for img in images:
             texto += pytesseract.image_to_string(img, lang='spa')
         return texto
-    except Exception as e:
+    except:
         return ""
 
 def extraer_monto(texto, patron):
     match = re.search(patron, texto)
     if match:
-        # Limpieza básica de caracteres para convertir a número
         valor_str = match.group(1).replace('.', '').replace(',', '.')
-        try:
-            return float(valor_str)
-        except:
-            return 0.0
+        try: return float(valor_str)
+        except: return 0.0
     return 0.0
 
-# --- BARRA LATERAL: GESTIÓN DE ARCHIVOS ---
+# --- BARRA LATERAL ---
 with st.sidebar:
-    st.header("📂 Gestión de Archivos")
+    st.header("📂 Carga de Archivos")
+    excel_file = st.file_uploader("1. Matriz Maestro (Excel)", type=["xlsx"])
+    new_pdfs = st.file_uploader("2. Lotes de PDFs", type=["pdf"], accept_multiple_files=True)
     
-    # 1. Cargar Excel (Maestro)
-    excel_file = st.file_uploader("1. Cargar Matriz Excel (Maestro)", type=["xlsx"])
-    if excel_file:
-        st.session_state.excel_maestro = pd.read_excel(excel_file)
-        st.success("Matriz cargada.")
-
-    # 2. Cargar PDFs (Acumulativo)
-    new_pdfs = st.file_uploader("2. Cargar lotes de PDFs", type=["pdf"], accept_multiple_files=True)
     if new_pdfs:
         for p in new_pdfs:
-            if p.name not in st.session_state.pdf_library:
-                st.session_state.pdf_library[p.name] = p
-        st.success(f"Librería: {len(st.session_state.pdf_library)} PDFs cargados.")
+            st.session_state.pdf_library[p.name] = p
+        st.success(f"Librería: {len(st.session_state.pdf_library)} PDFs")
 
-    # 3. Limpieza
-    st.markdown("---")
-    if st.button("🗑️ Limpiar Lote de PDFs"):
+    if st.button("🗑️ Limpiar todo"):
         st.session_state.pdf_library = {}
-        st.rerun()
-    if st.button("🧹 Borrar Resultados Anteriores"):
         st.session_state.resultados_auditoria = []
         st.rerun()
 
-# --- PANEL PRINCIPAL ---
-if st.session_state.excel_maestro is not None:
-    df = st.session_state.excel_maestro
+# --- PROCESO ---
+if excel_file is not None:
+    df_maestro = pd.read_excel(excel_file)
+    cols = df_maestro.columns.tolist()
     
-    # Identificación de columnas automática
-    cols = df.columns.tolist()
-    col_cp = next((c for c in cols if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
-    col_ruc = next((c for c in cols if "RUC" in str(c).upper()), None)
-    col_total = next((c for c in cols if "TOTAL" in str(c).upper()), None)
-    col_fecha = next((c for c in cols if "FECHA" in str(c).upper()), None)
+    # Identificar columnas
+    c_cp = next((c for c in cols if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
+    c_ruc = next((c for c in cols if "RUC" in str(c).upper()), None)
+    c_total = next((c for c in cols if "TOTAL" in str(c).upper()), None)
+    c_fecha = next((c for c in cols if "FECHA" in str(c).upper()), None)
 
-    st.subheader("📋 Control de Auditoría")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.write(f"**Líneas en Excel:** {len(df)}")
-    with col_b:
-        st.write(f"**PDFs en sistema:** {len(st.session_state.pdf_library)}")
-    
-    # Botón de Procesamiento
-    if st.button("🚀 PROCESAR AUDITORÍA"):
+    if st.button("🚀 EJECUTAR AUDITORÍA COMPLETA"):
         temp_results = []
-        progreso = st.progress(0)
-        bitacora = st.empty()
+        bar = st.progress(0)
+        status_text = st.empty()
 
-        for idx, fila in df.iterrows():
-            cp = str(fila[col_cp]).strip()
-            ruc_excel = str(fila[col_ruc]).strip()
-            monto_excel = fila[col_total]
-            fecha_val = str(fila[col_fecha])
-            año_actual = datetime.datetime.now().year
+        for idx, fila in df_maestro.iterrows():
+            cp = str(fila[c_cp]).strip()
+            ruc_ex = str(fila[c_ruc]).strip()
+            monto_ex = fila[c_total]
+            fecha_ex = str(fila[c_fecha])
+            
+            status_text.info(f"Procesando CP {cp}...")
             
             # REGLA 4: Año anterior
-            if str(año_actual-1) in fecha_val:
-                temp_results.append({"CP": cp, "ESTADO": "⚠️ DESECHADO", "MOTIVO": f"Año {año_actual-1} (Revisión humana)"})
+            if "2024" in fecha_ex:
+                temp_results.append({"CP": cp, "ESTADO": "⚠️ DESECHADO", "MOTIVO": "Año anterior (2024)"})
                 continue
 
-            # Buscar PDF en la librería por CP
-            pdf_match_name = next((name for name in st.session_state.pdf_library if cp in name), None)
+            # Buscar PDF
+            pdf_name = next((n for n in st.session_state.pdf_library if cp in n), None)
             
-            if pdf_match_name:
-                bitacora.info(f"Leyendo OCR para CP: {cp}...")
-                pdf_data = st.session_state.pdf_library[pdf_match_name]
-                texto = realizar_ocr_profundo(pdf_data)
+            if pdf_name:
+                texto = realizar_ocr_profundo(st.session_state.pdf_library[pdf_name])
+                fallos = []
                 
-                problemas = []
-                
-                # REGLA 1 y 2: Validación de RUC
-                if ruc_excel not in texto:
-                    problemas.append(f"RUC {ruc_excel} no hallado")
+                # REGLA 1 y 2: Validación RUC
+                if ruc_ex not in texto:
+                    fallos.append(f"RUC {ruc_ex} no encontrado")
 
-                # REGLA 5: Cuadre con Anticipos y Retenciones
-                amortizacion = extraer_monto(texto, r"(?i)AMORTIZA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
-                retencion = extraer_monto(texto, r"(?i)RETENCI[OÓ]N[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
+                # REGLA 5: Deducciones
+                amort = extraer_monto(texto, r"(?i)AMORTIZA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
+                ret = extraer_monto(texto, r"(?i)RETENCI[OÓ]N[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
                 multa = extraer_monto(texto, r"(?i)MULTA[A-Z\s]*[\-\s]*(\d+[\.,]\d{2})")
                 
-                calculo_neto = monto_excel - amortizacion - retencion - multa
+                neto_calc = monto_ex - amort - ret - multa
                 
-                # REGLA 3: Trimestre (Si el mes no coincide con cierre)
+                # REGLA 3: Trimestre
                 try:
-                    mes_doc = pd.to_datetime(fila[col_fecha]).month
-                    if mes_doc not in [3, 6, 9, 12]:
-                        problemas.append("Fuera de cierre trimestral")
-                except:
-                    pass
+                    mes = pd.to_datetime(fila[c_fecha]).month
+                    if mes not in [3, 6, 9, 12]:
+                        fallos.append("Mes fuera de cierre trimestral")
+                except: pass
 
-                # VALIDACIÓN FINAL
-                if problemas:
-                    temp_results.append({"CP": cp, "ESTADO": "REVISAR", "MOTIVO": " | ".join(problemas)})
+                if fallos:
+                    temp_results.append({"CP": cp, "ESTADO": "🔍 REVISAR", "MOTIVO": " | ".join(fallos)})
                 else:
-                    temp_results.append({"CP": cp, "ESTADO": "OK", "MOTIVO": f"Verificado. (Amort: ${amortizacion})"})
+                    temp_results.append({"CP": cp, "ESTADO": "✅ OK", "MOTIVO": f"Validado (Amort: ${amort})"})
             else:
-                temp_results.append({"CP": cp, "ESTADO": "PENDIENTE", "MOTIVO": "PDF no cargado"})
+                temp_results.append({"CP": cp, "ESTADO": "❌ PENDIENTE", "MOTIVO": "Falta archivo PDF"})
             
-            progreso.progress((idx + 1) / len(df))
+            bar.progress((idx + 1) / len(df_maestro))
 
         st.session_state.resultados_auditoria = temp_results
-        bitacora.success("Procesamiento completado.")
+        status_text.success("Auditoría finalizada.")
 
-    # --- MOSTRAR RESULTADOS Y REPORTES ---
+    # --- REPORTE ---
     if st.session_state.resultados_auditoria:
         res_df = pd.DataFrame(st.session_state.resultados_auditoria)
-        st.markdown("---")
+        st.subheader("📊 Resultados de la Auditoría")
+        st.dataframe(res_df, use_container_width=True)
+
+        # EXPORTACIÓN A EXCEL REAL (.xlsx)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            res_df.to_excel(writer, index=False, sheet_name='Reporte')
         
-        # Filtros de vista
-        opcion_vista = st.radio("Ver reporte:", ["Todos", "Solo con problemas", "Solo Correctos"], horizontal=True)
-        
-        if "problemas" in opcion_vista:
-            vista_df = res_df[res_df['ESTADO'] != "OK"]
-        elif "Correctos" in opcion_vista:
-            vista_df = res_df[res_df['ESTADO'] == "OK"]
-        else:
-            vista_df = res_df
-
-        st.dataframe(vista_df, use_container_width=True)
-
-        # REPORTES
-        col_r1, col_r2 = st.columns(2)
-        with col_r1:
-            csv_parcial = vista_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Reporte Parcial (Vista)", csv_parcial, "Parcial.csv")
-        with col_r2:
-            csv_final = res_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📊 Reporte Final (Matriz)", csv_final, "Auditoria_Final.csv")
-
+        st.download_button(
+            label="📥 DESCARGAR REPORTE EXCEL FINAL",
+            data=output.getvalue(),
+            file_name=f"Auditoria_{datetime.date.today()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 else:
-    st.warning("👈 Por favor, carga la Matriz Excel en la barra lateral.")
+    st.info("👈 Por favor, carga la Matriz Maestro para comenzar.")
