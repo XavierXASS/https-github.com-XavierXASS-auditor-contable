@@ -1,126 +1,114 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
-import re
+import requests
+import base64
 import io
+import re
 import time
 from pdf2image import convert_from_bytes
 from PIL import Image
 
-# 1. QA DE CONFIGURACIÓN INICIAL
-st.set_page_config(page_title="Auditoría Pro Xavier - QA Pass", layout="wide")
-st.title("🛡️ Sistema de Auditoría Xavier - V32 (QA de Conexión)")
+# 1. QA DE CONFIGURACIÓN
+st.set_page_config(page_title="Auditoría Xavier FINAL", layout="wide")
+st.title("🛡️ Centro de Auditoría Xavier - V33 (Vía Directa)")
 
-# --- PERSISTENCIA DE DATOS ---
 if 'maestro' not in st.session_state: st.session_state.maestro = None
-if 'conexion_ok' not in st.session_state: st.session_state.conexion_ok = False
 
-# --- BARRA LATERAL CON DIAGNÓSTICO ---
+# --- BARRA LATERAL ---
 with st.sidebar:
-    st.header("🔐 Seguridad de Acceso")
-    user_key = st.text_input("API Key de Google:", type="password", help="Genera una nueva en Google AI Studio si la anterior falló.")
+    st.header("🔐 Acceso")
+    # Tu llave actual: AIzaSyDk0LEdj70JhtPZ68NxrxogUaP-zjSqpnU
+    api_key = st.text_input("API Key de Google:", type="password")
     
-    # BOTÓN DE QA DE CONEXIÓN (TU PEDIDO)
-    if st.button("🔌 PROBAR CONEXIÓN (QA TEST)"):
-        if not user_key:
-            st.error("Por favor, pega una llave primero.")
-        else:
-            with st.spinner("Realizando Handshake con Google..."):
-                try:
-                    genai.configure(api_key=user_key)
-                    test_model = genai.GenerativeModel('gemini-1.5-flash')
-                    # Prueba de respuesta mínima
-                    response = test_model.generate_content("Hola, confirma conexión para auditoría.")
-                    if response:
-                        st.session_state.conexion_ok = True
-                        st.success("✅ CONEXIÓN EXITOSA: La IA está lista.")
-                    else:
-                        st.session_state.conexion_ok = False
-                        st.error("❌ Google no respondió. Revisa la validez de la llave.")
-                except Exception as e:
-                    st.session_state.conexion_ok = False
-                    st.error(f"❌ FALLO DE QA: {str(e)}")
-
     st.header("⚙️ Parámetros")
     entidad = st.selectbox("Entidad:", ["EMAPAG", "ÉPICO"])
     anio_rev = st.selectbox("Año de Revisión:", [2025, 2024, 2026])
     
-    if st.button("🚨 Reiniciar Sistema"):
+    st.markdown("---")
+    if st.button("🗑️ Limpiar PDFs (Mantener Excel)"):
+        st.cache_data.clear()
+        st.success("Lote de PDFs limpiado.")
+    
+    if st.button("🚨 Reiniciar TODO"):
         st.session_state.maestro = None
-        st.session_state.conexion_ok = False
         st.rerun()
 
-# --- LÓGICA DE AUDITORÍA (SOLO SI PASA EL QA) ---
-def auditar_pericial(pdf_bytes, cp, ruc, total, anio, entidad_name):
+# --- MOTOR DE IA (VÍA DIRECTA - SIN LIBRERÍAS) ---
+def auditar_con_ia_directa(pdf_bytes, cp, ruc, total, anio, entidad_name):
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+    
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Convertir primera página del PDF a imagen para la IA
         images = convert_from_bytes(pdf_bytes, dpi=100)
-        img_payload = []
-        for img in images[:6]:
-            buf = io.BytesIO()
-            img.save(buf, format='JPEG')
-            img_payload.append(Image.open(buf))
+        img_buf = io.BytesIO()
+        images[0].save(img_buf, format='JPEG')
+        img_b64 = base64.b64encode(img_buf.getvalue()).decode('utf-8')
+
+        prompt = f"Eres auditor para {entidad_name}. Revisa: CP {cp}, RUC {ruc}, VALOR {total}. Confirma si el CP y RUC están en el papel, si están los 5 documentos y si el cuadre factura-retencion es igual al SPI. Responde: ESTADO: [OK o REVISAR] | DETALLE: [explicacion]"
+
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+                ]
+            }]
+        }
         
-        prompt = f"""
-        Eres un Auditor experto para {entidad_name}. 
-        DATOS BUSCADOS: CP {cp}, RUC {ruc}, VALOR SPI {total}.
-        AÑO REVISIÓN: {anio}.
-        TAREAS:
-        1. Identifica: Pago, Contable, Factura, Retención y SPI (Sol Valdivia).
-        2. Verifica que RUC y CP coincidan en los papeles.
-        3. Realiza el cuadre: Factura - Retenciones == SPI.
-        4. Alertas: Fecha 2026 o año anterior ({anio-1}).
-        RESPONDE: TIPO: [tipo] | ESTADO: [OK o REVISAR] | DETALLE: [hallazgos]
-        """
-        response = model.generate_content([prompt] + img_payload)
-        return response.text.upper()
+        response = requests.post(url, json=payload, timeout=30)
+        if response.status_code == 200:
+            res_json = response.json()
+            texto_ia = res_json['candidates'][0]['content']['parts'][0]['text'].upper()
+            estado = "✅ OK" if "ESTADO: OK" in texto_ia else "🔍 REVISAR"
+            detalle = texto_ia.split("DETALLE:")[1].strip() if "DETALLE:" in texto_ia else texto_ia
+            return estado, detalle
+        else:
+            return "❌ ERROR", f"Fallo API: {response.status_code}"
     except Exception as e:
-        return f"ERROR EN PROCESO: {str(e)}"
+        return "❌ ERROR", str(e)
 
 # --- FLUJO PRINCIPAL ---
-if not st.session_state.conexion_ok:
-    st.warning("⚠️ El sistema está bloqueado. Por seguridad, primero realiza el 'TEST DE CONEXIÓN' en la barra lateral.")
-else:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("1. Excel Maestro")
-        ex_file = st.file_uploader("Subir Matriz", type=["xlsx"])
-        if ex_file and st.session_state.maestro is None:
-            st.session_state.maestro = pd.read_excel(ex_file)
-            for c in ['ESTADO_IA', 'INFORME', 'REVISADO']:
-                if c not in st.session_state.maestro.columns: st.session_state.maestro[c] = "PENDIENTE"
-            st.rerun()
+c1, c2 = st.columns(2)
+with c1:
+    st.subheader("1. Matriz Excel")
+    ex_file = st.file_uploader("Subir Maestro", type=["xlsx"])
+    if ex_file and st.session_state.maestro is None:
+        st.session_state.maestro = pd.read_excel(ex_file)
+        for c in ['ESTADO_IA', 'HALLAZGOS', 'REVISADO']:
+            if c not in st.session_state.maestro.columns: st.session_state.maestro[c] = "PENDIENTE"
 
-    with c2:
-        st.subheader("2. PDFs")
-        pdfs = st.file_uploader("Cargar PDFs", type=["pdf"], accept_multiple_files=True)
+with c2:
+    st.subheader("2. Comprobantes PDF")
+    pdfs = st.file_uploader("Cargar PDFs", type=["pdf"], accept_multiple_files=True)
 
-    if st.session_state.maestro is not None and pdfs:
-        if st.button("🚀 INICIAR AUDITORÍA PERICIAL"):
-            df = st.session_state.maestro
-            c_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
-            c_ruc = next((c for c in df.columns if "RUC" in str(c).upper()), None)
-            c_total = next((c for c in df.columns if "TOTAL" in str(c).upper() or "VALOR" in str(c).upper()), None)
+if st.session_state.maestro is not None and pdfs and api_key:
+    if st.button("🚀 INICIAR AUDITORÍA PERICIAL"):
+        df = st.session_state.maestro
+        c_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
+        c_ruc = next((c for c in df.columns if "RUC" in str(c).upper()), None)
+        c_total = next((c for c in df.columns if "TOTAL" in str(c).upper() or "VALOR" in str(c).upper()), None)
 
-            status_msg = st.empty()
-            for pdf in pdfs:
-                num = re.search(r'\d+', pdf.name)
-                if num:
-                    cp_id = num.group()
-                    idx_list = df[df[c_cp].astype(str).str.contains(cp_id)].index
-                    if not idx_list.empty:
-                        idx = idx_list[0]
-                        status_msg.info(f"IA analizando CP {cp_id}...")
-                        res_raw = auditar_pericial(pdf.read(), cp_id, df.at[idx, c_ruc], df.at[idx, c_total], anio_rev, entidad)
-                        df.at[idx, 'ESTADO_IA'] = "✅ OK" if "OK" in res_raw else "🔍 REVISAR"
-                        df.at[idx, 'INFORME'] = res_raw
-                        df.at[idx, 'REVISADO'] = "SÍ"
-            st.session_state.maestro = df
-            status_msg.success("Proceso terminado.")
+        status_msg = st.empty()
+        for pdf in pdfs:
+            # Extraer número del nombre del archivo
+            num_match = re.search(r'\d+', pdf.name)
+            if num_match:
+                cp_id = num_match.group()
+                idx_list = df[df[c_cp].astype(str).str.contains(cp_id)].index
+                if not idx_list.empty:
+                    idx = idx_list[0]
+                    status_msg.info(f"IA analizando CP {cp_id}...")
+                    s, d = auditar_con_ia_directa(pdf.read(), cp_id, df.at[idx, c_ruc], df.at[idx, c_total], anio_rev, entidad)
+                    df.at[idx, 'ESTADO_IA'] = s
+                    df.at[idx, 'HALLAZGOS'] = d
+                    df.at[idx, 'REVISADO'] = "SÍ"
+                    time.sleep(1)
+        st.session_state.maestro = df
+        status_msg.success("Lote procesado.")
 
-    if st.session_state.maestro is not None:
-        st.dataframe(st.session_state.maestro, use_container_width=True)
-        out = io.BytesIO()
-        with pd.ExcelWriter(out, engine='openpyxl') as w:
-            st.session_state.maestro.to_excel(w, index=False)
-        st.download_button("📥 DESCARGAR MATRIZ AUDITADA", out.getvalue(), "Auditoria_Final.xlsx")
+if st.session_state.maestro is not None:
+    st.dataframe(st.session_state.maestro, use_container_width=True)
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine='openpyxl') as w:
+        st.session_state.maestro.to_excel(w, index=False)
+    st.download_button("📥 DESCARGAR RESULTADOS", out.getvalue(), "Auditoria_Xavier.xlsx")
