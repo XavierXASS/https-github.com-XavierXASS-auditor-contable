@@ -3,4 +3,4 @@ pandas
 openpyxl
 pdf2image
 Pillow
-google-generativeai
+requests
