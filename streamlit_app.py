@@ -1,27 +1,34 @@
+import streamlit as st
+import pandas as pd
+import requests
+import base64
 import io
 import re
+from pdf2image import convert_from_bytes
+from PIL import Image
 
-st.set_page_config(page_title="Auditoría Xavier V25", layout="wide")
-st.title("🛡️ Sistema de Auditoría Xavier - V25")
+# Configuración inicial
+st.set_page_config(page_title="Auditoría Xavier", layout="wide")
 
-# --- DIRECCIÓN POSTAL DIGITAL (Corregida sin Typos) ---
+st.title("🛡️ Sistema de Auditoría Xavier - FINAL")
+st.markdown("---")
+
+# --- CONEXIÓN DIRECTA ---
 API_KEY = "AIzaSyCNYo_YWsGsArXjAzOk0_CY1ISiw83t1yI"
-# Usamos la versión v1 (Producción) en lugar de v1beta
 URL_API = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={API_KEY}"
 
 if 'maestro' not in st.session_state:
     st.session_state.maestro = None
 
-def auditar_con_ia(pdf_bytes, cp, ruc, total):
+def procesar_ia(pdf_bytes, cp, ruc, total):
     try:
-        from pdf2image import convert_from_bytes
         images = convert_from_bytes(pdf_bytes, dpi=100)
         img = images[0]
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
         img_64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
-        prompt = f"Analiza este documento. CP: {cp}, RUC: {ruc}, VALOR: {total}. Responde: ESTADO: [OK o REVISAR], DETALLE: [explicacion]"
+        prompt = f"Eres un auditor. Revisa si el documento tiene: CP {cp}, RUC {ruc} y VALOR {total}. Responde exacto: ESTADO: [OK o REVISAR], DETALLE: [explicacion]"
 
         payload = {
             "contents": [{
@@ -32,22 +39,20 @@ def auditar_con_ia(pdf_bytes, cp, ruc, total):
             }]
         }
         
-        response = requests.post(URL_API, json=payload, timeout=30)
-        if response.status_code == 200:
-            res_json = response.json()
+        r = requests.post(URL_API, json=payload, timeout=30)
+        if r.status_code == 200:
+            res_json = r.json()
             texto = res_json['candidates'][0]['content']['parts'][0]['text'].upper()
             est = "✅ OK" if "ESTADO: OK" in texto else "🔍 REVISAR"
             det = texto.split("DETALLE:")[1].strip() if "DETALLE:" in texto else texto
             return est, det
-        else:
-            return "❌ FALLO", f"Error {response.status_code}: La dirección no es válida."
+        return "❌ FALLO", f"Error API {r.status_code}"
     except Exception as e:
-        return "❌ FALLO", f"Error técnico: {str(e)}"
+        return "❌ FALLO", str(e)
 
 # --- INTERFAZ ---
 with st.sidebar:
-    st.header("Control")
-    if st.button("🚨 Reiniciar Sistema"):
+    if st.button("🚨 Reiniciar"):
         st.session_state.maestro = None
         st.rerun()
 
@@ -57,11 +62,10 @@ with c1:
     if ex_file and st.session_state.maestro is None:
         st.session_state.maestro = pd.read_excel(ex_file)
         for c in ['ESTADO_IA', 'HALLAZGOS', 'REVISADO']:
-            if c not in st.session_state.maestro.columns:
-                st.session_state.maestro[c] = "PENDIENTE"
+            st.session_state.maestro[c] = "PENDIENTE"
 
 with c2:
-    pdfs = st.file_uploader("2. Subir 1 PDF (Prueba Final)", type=["pdf"], accept_multiple_files=True)
+    pdfs = st.file_uploader("2. PDFs (Prueba con 1)", type=["pdf"], accept_multiple_files=True)
 
 if st.session_state.maestro is not None and pdfs:
     if st.button("🚀 INICIAR AUDITORÍA"):
@@ -78,13 +82,13 @@ if st.session_state.maestro is not None and pdfs:
                 idx_list = df[df[c_cp].astype(str).str.contains(cp_id)].index
                 if not idx_list.empty:
                     idx = idx_list[0]
-                    with st.spinner(f"Validando CP {cp_id}..."):
-                        s, d = auditar_con_ia(pdf.read(), cp_id, df.at[idx, c_ruc], df.at[idx, c_total])
+                    with st.spinner(f"Analizando CP {cp_id}..."):
+                        s, d = procesar_ia(pdf.read(), cp_id, df.at[idx, c_ruc], df.at[idx, c_total])
                         df.at[idx, 'ESTADO_IA'] = s
                         df.at[idx, 'HALLAZGOS'] = d
                         df.at[idx, 'REVISADO'] = "SÍ"
         st.session_state.maestro = df
-        st.success("Auditoría terminada.")
+        st.success("Listo.")
 
 if st.session_state.maestro is not None:
     st.dataframe(st.session_state.maestro, use_container_width=True)
