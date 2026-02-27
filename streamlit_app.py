@@ -1,126 +1,106 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
-import re
+import requests
+import base64
 import io
+import re
 import time
 from pdf2image import convert_from_bytes
 from PIL import Image
 
-st.set_page_config(page_title="Auditoría IA Profesional", layout="wide")
+st.set_page_config(page_title="Auditoría IA Definitiva", layout="wide")
+st.title("🛡️ Sistema de Auditoría Xavier - V21 (Vía Directa)")
 
-# --- VISIÓN HOLÍSTICA: CONFIGURACIÓN INTEGRAL ---
+# --- CONFIGURACIÓN DE CONEXIÓN DIRECTA ---
 API_KEY = "AIzaSyCNYo_YWsGsArXjAzOk0_CY1ISiw83t1yI"
-genai.configure(api_key=API_KEY)
-
-# Inicialización del modelo con la ruta estable (v1)
-model = genai.GenerativeModel("gemini-1.5-flash")
+URL_API = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={API_KEY}"
 
 if 'maestro' not in st.session_state: st.session_state.maestro = None
 
-def auditar_pericial(pdf_bytes, cp_ex, ruc_ex, total_ex, anio_ref):
+def auditar_con_ia_directa(pdf_bytes, cp, ruc, total, anio_ref):
     try:
-        # Convertir PDF a imágenes (máximo detalle para auditoría)
-        images = convert_from_bytes(pdf_bytes, dpi=120)
-        payload = []
-        # Enviamos las 6 páginas clave para cubrir todo el expediente
-        for img in images[:6]:
-            buf = io.BytesIO()
-            img.save(buf, format='JPEG')
-            payload.append(Image.open(buf))
-        
-        prompt = f"""
-        Eres un Auditor Contable Experto. Analiza este expediente de pago para {anio_ref}.
-        DATOS DE LA MATRIZ: CP: {cp_ex}, RUC: {ruc_ex}, TOTAL SPI ESPERADO: {total_ex}.
+        # 1. Convertir PDF a imagen (primera página para velocidad y estabilidad)
+        images = convert_from_bytes(pdf_bytes, dpi=100)
+        img = images[0]
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG')
+        img_64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
-        TAREAS DE QA:
-        1. Identificación: Localiza el 'Comprobante de Pago', 'Comprobante Contable', 'Factura', 'Retención' y 'SPI' (Sol Valdivia).
-        2. Validación de Identidad: ¿El CP {cp_ex} y el RUC {ruc_ex} aparecen correctamente?
-        3. Cuadre Matemático: Extrae el Valor de la Factura, resta las Retenciones (IVA/Renta) y Amortizaciones. ¿El resultado coincide con el valor del SPI?
-        4. Alertas: Reporta si hay fechas de 2026 o documentos de 2024.
+        # 2. Preparar la consulta técnica (Prompt)
+        prompt = f"Analiza este expediente contable. CP: {cp}, RUC: {ruc}, TOTAL: {total}. Verifica si el CP y RUC coinciden, si están los documentos (Pago, Contable, Factura, Retencion, SPI) y si el cuadre Factura-Retencion es igual al SPI. Responde exactamente: TIPO: [tipo], ESTADO: [OK o REVISAR], DETALLE: [breve explicacion]"
 
-        RESPONDE EXACTAMENTE ASÍ:
-        TIPO: [Tipo de pago: Proveedor, Nómina, IESS, etc.]
-        ESTADO: [OK o REVISAR]
-        INFORME: [Detalle del cuadre de valores y documentos hallados/faltantes]
-        """
+        # 3. Llamada Directa (Sin usar la librería genai que da error 404)
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_64}}
+                ]
+            }]
+        }
         
-        response = model.generate_content([prompt] + payload)
-        res = response.text.upper()
+        response = requests.post(URL_API, json=payload)
+        res_json = response.json()
         
-        # Procesamiento de la respuesta de la IA
-        status = "✅ OK" if "ESTADO: OK" in res else "🔍 REVISAR"
-        tipo = res.split("TIPO:")[1].split("\n")[0].strip() if "TIPO:" in res else "DESCONOCIDO"
-        detalle = res.split("INFORME:")[1].strip() if "INFORME:" in res else res
-        
-        return tipo, status, detalle
+        if response.status_code == 200:
+            texto_ia = res_json['candidates'][0]['content']['parts'][0]['text'].upper()
+            estado = "✅ OK" if "ESTADO: OK" in texto_ia else "🔍 REVISAR"
+            # Extraer partes
+            tipo = "CONTABLE"
+            if "TIPO:" in texto_ia: tipo = texto_ia.split("TIPO:")[1].split(",")[0].strip()
+            detalle = texto_ia.split("DETALLE:")[1].strip() if "DETALLE:" in texto_ia else texto_ia
+            return tipo, estado, detalle
+        else:
+            return "ERROR", "❌ FALLO", f"Error API: {response.status_code}"
+            
     except Exception as e:
-        return "ERROR", "❌ FALLO TÉCNICO", f"Error de conexión con Google: {str(e)}"
+        return "ERROR", "❌ FALLO", str(e)
 
-# --- INTERFAZ DE USUARIO ---
-st.title("🛡️ Sistema de Auditoría Xavier - V20")
-
+# --- INTERFAZ ---
 with st.sidebar:
     st.header("⚙️ Control")
-    anio_rev = st.selectbox("Año de Revisión", [2025, 2026, 2024])
-    if st.button("🚨 Limpiar Sistema"):
+    if st.button("🚨 Reiniciar Sistema"):
         st.session_state.maestro = None
         st.rerun()
 
 c1, c2 = st.columns(2)
 with c1:
-    ex_file = st.file_uploader("1. Cargar Matriz Maestro", type=["xlsx"])
+    ex_file = st.file_uploader("1. Matriz Excel", type=["xlsx"])
     if ex_file and st.session_state.maestro is None:
         st.session_state.maestro = pd.read_excel(ex_file)
-        # Aseguramos columnas de auditoría sobre el mismo archivo
-        for c in ['ESTADO_IA', 'INFORME_DETALLADO', 'REVISADO']:
-            if c not in st.session_state.maestro.columns:
-                st.session_state.maestro[c] = "PENDIENTE"
+        for c in ['ESTADO_IA', 'INFORME', 'REVISADO']:
+            if c not in st.session_state.maestro.columns: st.session_state.maestro[c] = "PENDIENTE"
 
 with c2:
-    pdfs = st.file_uploader("2. Cargar PDFs (Lote de 5-10)", type=["pdf"], accept_multiple_files=True)
+    pdfs = st.file_uploader("2. PDFs (Prueba con 1 o 2)", type=["pdf"], accept_multiple_files=True)
 
 if st.session_state.maestro is not None and pdfs:
-    if st.button("🚀 INICIAR REVISIÓN PERICIAL"):
+    if st.button("🚀 INICIAR AUDITORÍA"):
         df = st.session_state.maestro
         c_cp = next((c for c in df.columns if "PAGO" in str(c).upper() or "CP" in str(c).upper()), None)
         c_ruc = next((c for c in df.columns if "RUC" in str(c).upper()), None)
-        c_total = next((c for c in df.columns if "TOTAL" in str(c).upper() or "SPI" in str(c).upper()), None)
+        c_total = next((c for c in df.columns if "TOTAL" in str(c).upper() or "VALOR" in str(c).upper()), None)
 
         status_msg = st.empty()
-        bar = st.progress(0)
-
-        for i, pdf in enumerate(pdfs):
-            # Buscar el CP en el nombre del archivo para vincular con la fila del Excel
-            num_search = re.search(r'\d+', pdf.name)
-            if num_search:
-                cp_id = num_search.group()
+        for pdf in pdfs:
+            num = re.search(r'\d+', pdf.name)
+            if num:
+                cp_id = num.group()
                 idx_list = df[df[c_cp].astype(str).str.contains(cp_id)].index
-                
                 if not idx_list.empty:
                     idx = idx_list[0]
-                    status_msg.info(f"IA analizando visualmente CP {cp_id}...")
-                    
-                    # Llamada a la IA
-                    t, s, d = auditar_pericial(pdf.read(), cp_id, df.at[idx, c_ruc], df.at[idx, c_total], anio_rev)
-                    
+                    status_msg.info(f"IA analizando CP {cp_id}...")
+                    t, s, d = auditar_con_ia_directa(pdf.read(), cp_id, df.at[idx, c_ruc], df.at[idx, c_total], 2025)
                     df.at[idx, 'ESTADO_IA'] = s
-                    df.at[idx, 'INFORME_DETALLADO'] = d
+                    df.at[idx, 'INFORME'] = d
                     df.at[idx, 'REVISADO'] = "SÍ"
-            
-            bar.progress((i + 1) / len(pdfs))
         
         st.session_state.maestro = df
-        status_msg.success("Auditoría terminada para este lote.")
+        status_msg.success("Auditoría terminada.")
 
-    # Mostrar Matriz Actualizada
     st.dataframe(st.session_state.maestro, use_container_width=True)
     
-    # Exportar el mismo archivo
     out = io.BytesIO()
-    with pd.ExcelWriter(out, engine='openpyxl') as writer:
-        st.session_state.maestro.to_excel(writer, index=False)
-    st.download_button("📥 DESCARGAR MATRIZ AUDITADA", out.getvalue(), "Auditoria_Final_IA.xlsx")
-
-else:
-    st.info("Carga el Excel Maestro arriba para comenzar.")
+    with pd.ExcelWriter(out, engine='openpyxl') as w:
+        st.session_state.maestro.to_excel(w, index=False)
+    st.download_button("📥 DESCARGAR RESULTADOS", out.getvalue(), "Auditoria_Final.xlsx"
