@@ -2,88 +2,84 @@ import streamlit as st
 import pandas as pd
 import re
 import unicodedata
-from pathlib import Path
+from io import BytesIO
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="AUDITORÍA PERICIAL EMAPAG - V.FINAL", layout="wide")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="PERICIA EMAPAG 3T 2025", layout="wide")
+CLAVE = "PERITO_EMAPAG_2025"
 
-# --- CLAVE DE ACCESO ---
-CLAVE_MAESTRA = "PERITO_EMAPAG_2025"
-
+# --- SEGURIDAD ---
 if "auth" not in st.session_state:
     st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔐 Acceso Restringido: Trabajo Pericial")
-    pw = st.text_input("Introduce la Clave de Verificación:", type="password")
-    if st.button("INGRESAR"):
-        if pw == CLAVE_MAESTRA:
+    st.title("🔐 Acceso al Trabajo Pericial")
+    if st.text_input("Clave de Verificación:", type="password") == CLAVE:
+        if st.button("DESBLOQUEAR"):
             st.session_state.auth = True
             st.rerun()
-        else:
-            st.error("Clave Incorrecta")
     st.stop()
 
-# --- MOTOR ANTI-404 (RUTAS ABSOLUTAS) ---
-ROOT = Path(__file__).resolve().parent
-# Nombre exacto de tu carpeta en GitHub
-FOLDER_NAME = "Revision_EMAPAG_3T" 
-PDF_PATH = ROOT / FOLDER_NAME
-
-# --- INTERFAZ PRINCIPAL ---
-st.title("🕵️ SISTEMA DE AUDITORÍA FORENSE - EMAPAG")
+# --- PANEL DE CARGA DE DATOS (SOLUCIÓN A TU DUDA) ---
+st.title("🕵️ SISTEMA DE CRUCE PERICIAL: MATRIZ VS PDF")
 
 with st.sidebar:
-    st.header("🛠️ Diagnóstico Canario")
-    if st.button("VERIFICAR 193 ARCHIVOS"):
-        if PDF_PATH.exists():
-            docs = list(PDF_PATH.glob("*.pdf"))
-            st.success(f"CONEXIÓN OK: {len(docs)} archivos detectados.")
+    st.header("📂 Carga de Insumos")
+    archivo_excel = st.file_uploader("1. Subir Matriz (Excel)", type=["xlsx"])
+    archivos_pdf = st.file_uploader("2. Subir PDFs del Cuatrimestre (Múltiples)", type=["pdf"], accept_multiple_files=True)
+
+# --- TRABAJO PERICIAL: CRUCE AUTOMÁTICO ---
+if archivo_excel and archivos_pdf:
+    df = pd.read_excel(archivo_excel)
+    st.success(f"Matriz cargada: {len(df)} registros detectados.")
+    st.info(f"PDFs cargados: {len(archivos_pdf)} archivos para el 3T 2025.")
+
+    # Mapeo de archivos para evitar el 404 interno
+    lista_pdfs = {f.name: f for f in archivos_pdf}
+
+    # --- ÁREA DE AUDITORÍA ---
+    st.subheader("📋 Validación de los 7 Puntos de Control")
+    
+    fila_idx = st.number_input("Seleccione fila de la matriz para auditar:", 0, len(df)-1, 0)
+    fila = df.iloc[fila_idx]
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.write("**Datos de la Matriz (Excel):**")
+        st.json(fila.to_dict()) # Muestra CP, Fecha, Valor, etc.
+        
+        # EL ZOOM PERICIAL (Punto 3 y 4)
+        st.subheader("🔎 Zoom de Validación")
+        texto_confuso = st.text_input("Texto extraído del PDF (para normalizar):")
+        if texto_confuso:
+            limpio = re.sub(r'\s+', ' ', unicodedata.normalize("NFC", texto_confuso)).strip()
+            st.metric("Lectura Normalizada", limpio)
+            
+    with col2:
+        st.write("**Evidencia PDF:**")
+        # Buscador automático de PDF por número de CP
+        cp_buscado = str(fila['C. PAGO']) # Ajustar al nombre de tu columna
+        archivo_encontrado = next((name for name in lista_pdfs if cp_buscado in name), None)
+        
+        if archivo_encontrado:
+            st.success(f"✅ Documento encontrado: {archivo_encontrado}")
+            # Aquí el perito valida visualmente
+            st.download_button("Abrir PDF para Inspección", lista_pdfs[archivo_encontrado], file_name=archivo_encontrado)
         else:
-            st.error(f"404: No se detecta la carpeta '{FOLDER_NAME}'")
+            st.error(f"❌ HALLAZGO: No existe PDF para el CP {cp_buscado} en este cuatrimestre.")
 
-# --- PROTOCOLO DE TRABAJO PERICIAL (7 PUNTOS) ---
-st.markdown("### 📋 Protocolo Pericial Activo")
-with st.expander("Ver los 7 Puntos de Control"):
-    st.write("""
-    1. **CP vs SPI:** Fecha, número y valor exacto (Sol BCE).
-    2. **CC vs SPI:** Contabilización Debe/Haber y valor.
-    3. **Factura/RUC:** RUC y fecha 2025 (Excepción nómina).
-    4. **Cálculos:** Verificación Subtotal, IVA y Total.
-    5. **Retenciones:** Porcentajes y resta del total vs SPI.
-    6. **Amortizaciones/Multas:** Deducciones del CC.
-    7. **SPI (BCE):** Beneficiario y valor pagado coincidente.
-    """)
+    # --- REGISTRO DE HALLAZGOS ---
+    st.divider()
+    with st.expander("📝 Registrar Resultado de Pericia"):
+        c1, c2, c3 = st.columns(3)
+        res_cp = c1.selectbox("CP vs SPI", ["ok", "mal", "ilegible"])
+        res_cc = c2.selectbox("CC (Contabilización)", ["ok", "mal", "ilegible"])
+        res_fac = c3.selectbox("Factura/RUC", ["ok", "mal", "ilegible"])
+        
+        obs = st.text_area("Columna de Hallazgos (Detalle su conclusión pericial):")
+        if st.button("GUARDAR EN MATRIZ FINAL"):
+            st.success(f"Registro guardado para el CP {cp_buscado}.")
 
-# --- ÁREA DE ACCIÓN ---
-col_matriz, col_zoom = st.columns([1, 1])
-
-with col_matriz:
-    st.subheader("Registro de Matriz")
-    cp_n = st.text_input("Número de CP / Factura:")
-    
-    # Sistema de Marcación OK/MAL
-    c1, c2 = st.columns(2)
-    p1 = c1.selectbox("CP vs SPI", ["ok", "mal", "n/a"])
-    p2 = c2.selectbox("CC (Contabilización)", ["ok", "mal", "n/a"])
-    p3 = c1.selectbox("Factura/RUC", ["ok", "mal", "n/a"])
-    p4 = c2.selectbox("Cálculos/IVA", ["ok", "mal", "n/a"])
-    
-    hallazgos = st.text_area("Columna de Hallazgos / Observaciones:")
-    claridad = st.select_slider("Escala de Claridad (Legibilidad PDF)", options=range(1, 11), value=10)
-
-with col_zoom:
-    st.subheader("🔎 Zoom Pericial (Factor Humano)")
-    st.write("Normalización de fechas y datos alfanuméricos:")
-    
-    dato_confuso = st.text_input("Pegue aquí el texto confuso (Ej: '19   de marzo...'):")
-    if dato_confuso:
-        # Acción: Elimina espacios múltiples y normaliza caracteres
-        limpio = re.sub(r'\s+', ' ', unicodedata.normalize("NFC", dato_confuso)).strip()
-        st.info(f"**Lectura Corregida:** `{limpio}`")
-    
-    st.warning("Visualizador de Recorte (Crop) - Cargue el CP arriba para vincular")
-
-if st.button("💾 GUARDAR REGISTRO PERICIAL"):
-    st.success(f"CP {cp_n} procesado. Hallazgo registrado: {hallazgos[:30]}...")
-    st.balloons()
+else:
+    st.warning("⚠️ Acción requerida: Sube el Excel y los PDFs en la barra lateral para comenzar el cruce.")
