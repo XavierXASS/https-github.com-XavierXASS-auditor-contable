@@ -1,74 +1,89 @@
 import streamlit as st
 import pandas as pd
-import os
 import re
+import unicodedata
 from pathlib import Path
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="AUDITORÍA EMAPAG 3T", layout="wide")
+st.set_page_config(page_title="AUDITORÍA PERICIAL EMAPAG - V.FINAL", layout="wide")
 
-# --- TRABAJO PERICIAL: PUNTOS DE CONTROL ---
-# 1. CP/SPI | 2. CC/SPI | 3. RUC/FECHA | 4. CÁLCULOS | 5. RETENCIONES | 6. MULTAS | 7. BENEFICIARIO
+# --- CLAVE DE ACCESO ---
+CLAVE_MAESTRA = "PERITO_EMAPAG_2025"
 
-# 1. CLAVE DE VERIFICACIÓN (Blindaje de acceso)
-if "autenticado" not in st.session_state:
-    st.session_state.autenticado = False
+if "auth" not in st.session_state:
+    st.session_state.auth = False
 
-if not st.session_state.autenticado:
-    st.title("🔐 Acceso Pericial")
-    clave = st.text_input("Introduce la Clave Maestra:", type="password")
-    if st.button("DESBLOQUEAR APP"):
-        if clave == "PERITO_EMAPAG_2025": # Cambia esta clave si deseas
-            st.session_state.autenticado = True
+if not st.session_state.auth:
+    st.title("🔐 Acceso Restringido: Trabajo Pericial")
+    pw = st.text_input("Introduce la Clave de Verificación:", type="password")
+    if st.button("INGRESAR"):
+        if pw == CLAVE_MAESTRA:
+            st.session_state.auth = True
             st.rerun()
         else:
             st.error("Clave Incorrecta")
     st.stop()
 
-# --- DIAGNÓSTICO CANARIO (Solución al 404) ---
-# Este bloque detecta automáticamente si estás en Windows (local) o Linux (Streamlit Cloud)
+# --- MOTOR ANTI-404 (RUTAS ABSOLUTAS) ---
 ROOT = Path(__file__).resolve().parent
-PDF_FOLDER = ROOT / "Revision_EMAPAG_3T" # Asegúrate de que tu carpeta se llame así en GitHub
+# Nombre exacto de tu carpeta en GitHub
+FOLDER_NAME = "Revision_EMAPAG_3T" 
+PDF_PATH = ROOT / FOLDER_NAME
 
-with st.expander("🛠️ DIAGNÓSTICO DE CONEXIÓN (EVITAR 404)"):
-    if st.button("🔍 EJECUTAR CHECK DE ARCHIVOS"):
-        if PDF_FOLDER.exists():
-            total_pdf = len(list(PDF_FOLDER.glob("*.pdf")))
-            st.success(f"CONEXIÓN OK: Se detectaron {total_pdf} archivos en {PDF_FOLDER}")
+# --- INTERFAZ PRINCIPAL ---
+st.title("🕵️ SISTEMA DE AUDITORÍA FORENSE - EMAPAG")
+
+with st.sidebar:
+    st.header("🛠️ Diagnóstico Canario")
+    if st.button("VERIFICAR 193 ARCHIVOS"):
+        if PDF_PATH.exists():
+            docs = list(PDF_PATH.glob("*.pdf"))
+            st.success(f"CONEXIÓN OK: {len(docs)} archivos detectados.")
         else:
-            st.error(f"ERROR 404: No se encuentra la carpeta '{PDF_FOLDER.name}' en la raíz.")
-            st.info("Sugerencia: Verifica que la carpeta esté subida a GitHub con ese nombre exacto.")
+            st.error(f"404: No se detecta la carpeta '{FOLDER_NAME}'")
 
-# --- INTERFAZ DE TRABAJO PERICIAL ---
-st.title("🕵️ SISTEMA DE AUDITORÍA: EMAPAG 3T")
+# --- PROTOCOLO DE TRABAJO PERICIAL (7 PUNTOS) ---
+st.markdown("### 📋 Protocolo Pericial Activo")
+with st.expander("Ver los 7 Puntos de Control"):
+    st.write("""
+    1. **CP vs SPI:** Fecha, número y valor exacto (Sol BCE).
+    2. **CC vs SPI:** Contabilización Debe/Haber y valor.
+    3. **Factura/RUC:** RUC y fecha 2025 (Excepción nómina).
+    4. **Cálculos:** Verificación Subtotal, IVA y Total.
+    5. **Retenciones:** Porcentajes y resta del total vs SPI.
+    6. **Amortizaciones/Multas:** Deducciones del CC.
+    7. **SPI (BCE):** Beneficiario y valor pagado coincidente.
+    """)
 
-col_datos, col_zoom = st.columns([1, 1])
+# --- ÁREA DE ACCIÓN ---
+col_matriz, col_zoom = st.columns([1, 1])
 
-with col_datos:
-    st.subheader("📊 Control de Matriz")
-    # Aquí puedes cargar tu Excel con pd.read_excel si está en la raíz
-    st.write("Seleccione el CP para iniciar los 7 puntos de control.")
-    cp_revisar = st.text_input("Número de Comprobante (CP):")
+with col_matriz:
+    st.subheader("Registro de Matriz")
+    cp_n = st.text_input("Número de CP / Factura:")
     
-    # Checkbox de cumplimiento
-    st.checkbox("1. CP coincide con SPI (Valor/Fecha)")
-    st.checkbox("2. CC coincide con SPI (Debe/Haber)")
-    st.checkbox("3. Factura/RUC validado")
+    # Sistema de Marcación OK/MAL
+    c1, c2 = st.columns(2)
+    p1 = c1.selectbox("CP vs SPI", ["ok", "mal", "n/a"])
+    p2 = c2.selectbox("CC (Contabilización)", ["ok", "mal", "n/a"])
+    p3 = c1.selectbox("Factura/RUC", ["ok", "mal", "n/a"])
+    p4 = c2.selectbox("Cálculos/IVA", ["ok", "mal", "n/a"])
     
-    nota_hallazgo = st.text_area("Hallazgos (Columna de Observaciones):")
+    hallazgos = st.text_area("Columna de Hallazgos / Observaciones:")
+    claridad = st.select_slider("Escala de Claridad (Legibilidad PDF)", options=range(1, 11), value=10)
 
 with col_zoom:
-    st.subheader("🔎 ZOOM PERICIAL (Factor Humano)")
-    st.write("Corregir interpretaciones de fechas/nombres:")
+    st.subheader("🔎 Zoom Pericial (Factor Humano)")
+    st.write("Normalización de fechas y datos alfanuméricos:")
     
-    texto_sucio = st.text_input("Dato confuso del PDF (Ej: 19  de marzo...):")
-    if texto_sucio:
-        # Acción: Normalización inmediata de espacios del operador humano
-        texto_limpio = re.sub(r'\s+', ' ', texto_sucio).strip()
-        st.success(f"**Resultado para Matriz:** `{texto_limpio}`")
+    dato_confuso = st.text_input("Pegue aquí el texto confuso (Ej: '19   de marzo...'):")
+    if dato_confuso:
+        # Acción: Elimina espacios múltiples y normaliza caracteres
+        limpio = re.sub(r'\s+', ' ', unicodedata.normalize("NFC", dato_confuso)).strip()
+        st.info(f"**Lectura Corregida:** `{limpio}`")
     
-    st.metric("Calidad de Lectura", "8/10", delta="Normalizado")
+    st.warning("Visualizador de Recorte (Crop) - Cargue el CP arriba para vincular")
 
-if st.button("💾 REGISTRAR CAMBIOS"):
+if st.button("💾 GUARDAR REGISTRO PERICIAL"):
+    st.success(f"CP {cp_n} procesado. Hallazgo registrado: {hallazgos[:30]}...")
     st.balloons()
-    st.success("Información guardada en la matriz temporal.")
