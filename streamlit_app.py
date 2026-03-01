@@ -1,138 +1,129 @@
 import streamlit as st
 import pandas as pd
 import re
-import time
 import base64
+import os
+import time
 from io import BytesIO
 
-# --- CONFIGURACIÓN V46: PROTOCOLO DE CARGA ESCALONADA ---
-st.set_page_config(page_title="AUDITORÍA BATCH V46", layout="wide")
+# --- V50: PROTOCOLO DE PERSISTENCIA PERICIAL ---
+st.set_page_config(page_title="PERICIA EMAPAG V50", layout="wide")
 
-# Inicialización de estados persistentes
-if 'db' not in st.session_state: st.session_state.db = {} # Hallazgos acumulados
-if 'lote_actual' not in st.session_state: st.session_state.lote_actual = 0
+DB_FILE = "progreso_pericial_3T_2025.csv"
+
+def cargar_datos_previos():
+    if os.path.exists(DB_FILE):
+        return pd.read_csv(DB_FILE, dtype={'CP': str}).set_index('CP').to_dict('index')
+    return {}
+
+if 'db' not in st.session_state: st.session_state.db = cargar_datos_previos()
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 # --- SEGURIDAD ---
 if not st.session_state.auth:
-    st.title("🔐 Terminal Forense - Acceso Restringido")
-    pw = st.text_input("Clave Maestra:", type="password")
-    if st.button("ACCEDER"):
-        if pw == "PERITO_EMAPAG_2025":
+    st.title("🔐 Terminal de Auditoría Forense")
+    if st.text_input("Credencial Maestra:", type="password") == "PERITO_EMAPAG_2025":
+        if st.button("DESBLOQUEAR"):
             st.session_state.auth = True
             st.rerun()
     st.stop()
 
-# --- UTILIDADES TÉCNICAS ---
 def clean_id(t): return re.sub(r'\D', '', str(t))
 
-def display_pdf(file):
-    file.seek(0)
-    base64_pdf = base64.b64encode(file.read()).decode('utf-8')
-    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700" type="application/pdf"></iframe>'
-    st.markdown(pdf_display, unsafe_allow_html=True)
-    file.seek(0)
-
-# --- INTERFAZ ---
-st.title("🛡️ Auditoría Forense 3T-2025: Procesamiento por Lotes")
-
+# --- PANEL DE CONTROL ---
 with st.sidebar:
-    st.header("📂 Carga Masiva (175+ PDFs)")
+    st.header("📂 Carga de Evidencia")
     ex_file = st.file_uploader("1. Matriz Excel", type=["xlsx"])
-    pdf_files = st.file_uploader("2. Universo de PDFs", type=["pdf"], accept_multiple_files=True)
+    pdf_files = st.file_uploader("2. PDFs (Universo 175+)", type=["pdf"], accept_multiple_files=True)
     
-    tamaño_lote = st.slider("Tamaño del Lote de Trabajo", 5, 20, 10)
+    st.divider()
+    lote_size = st.number_input("Registros por Lote", min_value=1, value=10)
+    st.info(f"📑 Revisiones en Memoria: {len(st.session_state.db)}")
     
-    if st.button("🗑️ REINICIAR TODA LA PERICIA"):
+    if st.button("⚠️ BORRAR PROGRESO Y REINICIAR"):
+        if os.path.exists(DB_FILE): os.remove(DB_FILE)
         st.session_state.clear()
         st.rerun()
 
 if ex_file and pdf_files:
-    # 1. Indexación Silenciosa (Antigravity)
+    # Indexación ligera (solo nombres)
     pdf_repo = {clean_id(f.name): f for f in pdf_files}
     df = pd.read_excel(ex_file)
-    
-    # Identificar columna CP
     c_cp = next((c for c in df.columns if 'CP' in str(c).upper() or 'PAGO' in str(c).upper()), df.columns[0])
     
-    total_registros = len(df)
-    total_lotes = (total_registros // tamaño_lote) + (1 if total_registros % tamaño_lote != 0 else 0)
-
-    # --- BARRA DE PROGRESO Y CONTADORES ---
-    st.subheader(f"📊 Progreso Global: {len(st.session_state.db)} de {total_registros} procesados")
-    progreso = len(st.session_state.db) / total_registros
-    st.progress(progreso)
+    # Navegación
+    total = len(df)
+    num_lotes = (total // lote_size) + (1 if total % lote_size != 0 else 0)
+    lote_sel = st.number_input("Lote de Trabajo:", 1, num_lotes, value=1)
     
-    # --- VISOR DE LOTES ---
-    col_nav, col_status = st.columns([2, 1])
-    with col_nav:
-        lote_sel = st.number_input(f"Trabajando en Lote (1 a {total_lotes})", 1, total_lotes, st.session_state.lote_actual + 1)
-        st.session_state.lote_actual = lote_sel - 1
-    
-    inicio = st.session_state.lote_actual * tamaño_lote
-    fin = min(inicio + tamaño_lote, total_registros)
+    inicio = (lote_sel - 1) * lote_size
+    fin = min(inicio + lote_size, total)
     df_lote = df.iloc[inicio:fin]
 
-    with col_status:
-        st.info(f"Mostrando registros {inicio + 1} al {fin}")
-
-    # --- ZONA DE TRABAJO ---
+    # --- ÁREA DE TRABAJO ---
     st.divider()
-    idx_lote = st.selectbox("🔍 Seleccionar CP del Lote Actual:", range(len(df_lote)), 
-                            format_func=lambda x: f"CP: {df_lote.iloc[x][c_cp]}")
+    idx_lote = st.selectbox("🎯 Seleccionar Registro para Confrontación:", range(len(df_lote)), 
+                            format_func=lambda x: f"Fila {inicio+x+1} | CP: {df_lote.iloc[x][c_cp]}")
     
     fila = df_lote.iloc[idx_lote]
     id_actual = clean_id(fila[c_cp])
     
-    col_pdf, col_form = st.columns([1.5, 1])
+    col_pdf, col_form = st.columns([1.6, 1])
 
     with col_pdf:
-        st.subheader("🖼️ Visor de Evidencia")
+        st.write(f"### 🖼️ Soporte Documental (ID: {id_actual})")
         if id_actual in pdf_repo:
-            display_pdf(pdf_repo[id_actual])
+            f = pdf_repo[id_actual]
+            f.seek(0)
+            b64 = base64.b64encode(f.read()).decode('utf-8')
+            st.markdown(f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="750"></iframe>', unsafe_allow_html=True)
+            f.seek(0)
         else:
-            st.error(f"❌ HALLAZGO: CP {id_actual} SIN RESPALDO PDF")
+            st.error(f"🚨 HALLAZGO: EL CP {id_actual} NO TIENE RESPALDO PDF EN CARGA.")
 
     with col_form:
-        st.subheader("🖋️ Veredicto de Auditoría")
-        st.write(fila.dropna())
+        st.write("### 📜 Datos Matriz")
+        st.dataframe(fila.dropna(), use_container_width=True)
         
-        # Estado actual si ya fue revisado
-        estado_previo = st.session_state.db.get(id_actual, {"status": "PENDIENTE", "obs": ""})
+        # Recuperar persistencia
+        prev = st.session_state.db.get(id_actual, {"status": "OK", "obs": "", "lote": lote_sel})
         
-        with st.form(f"form_{id_actual}"):
-            res = st.radio("Resultado:", ["OK", "ERROR EN RUC", "ERROR EN MONTO", "ERROR EN FECHA", "SIN PDF", "OTRO"], 
-                           index=0 if estado_previo['status'] == "PENDIENTE" else ["OK", "ERROR EN RUC", "ERROR EN MONTO", "ERROR EN FECHA", "SIN PDF", "OTRO"].index(estado_previo['status']) if estado_previo['status'] in ["OK", "ERROR EN RUC", "ERROR EN MONTO", "ERROR EN FECHA", "SIN PDF", "OTRO"] else 5)
-            nota = st.text_area("Detalle del Hallazgo:", value=estado_previo['obs'])
+        with st.form(f"form_auditoria_{id_actual}"):
+            res = st.selectbox("Veredicto Pericial:", ["OK", "RUC ERRÓNEO", "MONTO DIFERENTE", "FECHA TRASLAPADA", "SIN SOPORTE PDF", "ERROR CONTABLE"], 
+                               index=0 if prev['status'] == "OK" else ["OK", "RUC ERRÓNEO", "MONTO DIFERENTE", "FECHA TRASLAPADA", "SIN SOPORTE PDF", "ERROR CONTABLE"].index(prev['status']) if prev['status'] in ["OK", "RUC ERRÓNEO", "MONTO DIFERENTE", "FECHA TRASLAPADA", "SIN SOPORTE PDF", "ERROR CONTABLE"] else 0)
+            obs = st.text_area("Notas Técnicas del Hallazgo:", value=prev['obs'])
             
-            if st.form_submit_button("💾 GUARDAR Y CONTINUAR"):
-                st.session_state.db[id_actual] = {"status": res, "obs": nota}
-                st.success(f"CP {id_actual} guardado con éxito.")
+            if st.form_submit_button("💾 REGISTRAR Y ASEGURAR"):
+                # Guardar en RAM
+                st.session_state.db[id_actual] = {"status": res, "obs": obs, "lote": lote_sel}
+                # Guardar en DISCO (Archivo físico)
+                pd.DataFrame.from_dict(st.session_state.db, orient='index').to_csv(DB_FILE)
+                st.success(f"Registro {id_actual} asegurado en disco.")
                 time.sleep(0.5)
                 st.rerun()
 
-    # --- BITÁCORA ACUMULATIVA (HISTORIAL) ---
+    # --- BITÁCORA DEL LOTE (PEDIDO XAVIER) ---
     st.divider()
-    with st.expander("📜 Bitácora de Hallazgos Acumulados", expanded=False):
-        if st.session_state.db:
-            bitacora_df = pd.DataFrame.from_dict(st.session_state.db, orient='index').reset_index()
-            bitacora_df.columns = ['ID_CP', 'ESTADO', 'OBSERVACIÓN']
-            st.table(bitacora_df.tail(10)) # Muestra los últimos 10 para no saturar
-        else:
-            st.write("No hay revisiones aún.")
+    st.subheader(f"📜 Bitácora de Hallazgos - Lote {lote_sel}")
+    lote_data = [{"CP": k, "Estado": v['status'], "Hallazgo": v['obs']} 
+                 for k, v in st.session_state.db.items() if v.get('lote') == lote_sel]
+    
+    if lote_data:
+        st.table(pd.DataFrame(lote_data))
+    else:
+        st.info("No hay registros validados en este lote.")
 
-    # --- REPORTE FINAL ---
-    if st.button("📄 GENERAR INFORME FINAL (EXCEL)"):
-        df_final = df.copy()
-        df_final['ESTADO_PERICIAL'] = df_final[c_cp].apply(lambda x: st.session_state.db.get(clean_id(x), {}).get('status', 'NO REVISADO'))
-        df_final['HALLAZGOS'] = df_final[c_cp].apply(lambda x: st.session_state.db.get(clean_id(x), {}).get('obs', ''))
+    # --- REPORTE MAESTRO ---
+    st.divider()
+    if st.button("📦 CONSOLIDAR INFORME PERICIAL FINAL"):
+        reporte = df.copy()
+        reporte['ESTADO_PERICIAL'] = reporte[c_cp].apply(lambda x: st.session_state.db.get(clean_id(x), {}).get('status', 'NO REVISADO'))
+        reporte['NOTAS_HALLAZGOS'] = reporte[c_cp].apply(lambda x: st.session_state.db.get(clean_id(x), {}).get('obs', ''))
         
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_final.to_excel(writer, index=False)
-        
-        st.download_button("📥 Descargar Informe Completo", output.getvalue(), "Informe_Forense_Final.xlsx")
-        st.balloons()
+        out = BytesIO()
+        with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
+            reporte.to_excel(writer, index=False)
+        st.download_button("📥 Descargar Matriz Auditada (Excel)", out.getvalue(), "Informe_Forense_Emapag_3T.xlsx")
 
 else:
-    st.info("👋 Xavier, cargue la matriz y los 175 PDFs para iniciar el proceso por lotes.")
+    st.info("Esperando carga masiva de archivos para iniciar confrontación...")
