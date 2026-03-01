@@ -1,85 +1,95 @@
 import streamlit as st
 import pandas as pd
 import re
-import unicodedata
-from io import BytesIO
+from pathlib import Path
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="PERICIA EMAPAG 3T 2025", layout="wide")
+# --- CONFIGURACIÓN Y ESTILO ---
+st.set_page_config(page_title="PERICIA FORENSE EMAPAG 3T", layout="wide")
 CLAVE = "PERITO_EMAPAG_2025"
 
-# --- SEGURIDAD ---
+# --- BLOQUE DE SEGURIDAD ---
 if "auth" not in st.session_state:
     st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔐 Acceso al Trabajo Pericial")
-    if st.text_input("Clave de Verificación:", type="password") == CLAVE:
+    st.title("🔐 Acceso Sistema Pericial")
+    if st.text_input("Clave Maestra:", type="password") == CLAVE:
         if st.button("DESBLOQUEAR"):
             st.session_state.auth = True
             st.rerun()
     st.stop()
 
-# --- PANEL DE CARGA DE DATOS (SOLUCIÓN A TU DUDA) ---
-st.title("🕵️ SISTEMA DE CRUCE PERICIAL: MATRIZ VS PDF")
+# --- INTERFAZ DE CARGA ---
+st.title("🕵️ PANEL DE CONTROL PERICIAL - EMAPAG 3T")
 
 with st.sidebar:
-    st.header("📂 Carga de Insumos")
-    archivo_excel = st.file_uploader("1. Subir Matriz (Excel)", type=["xlsx"])
-    archivos_pdf = st.file_uploader("2. Subir PDFs del Cuatrimestre (Múltiples)", type=["pdf"], accept_multiple_files=True)
+    st.header("📂 Insumos del Cuatrimestre")
+    archivo_excel = st.file_uploader("1. Matriz (.xlsx)", type=["xlsx"])
+    archivos_pdf = st.file_uploader("2. Comprobantes (PDFs)", type=["pdf"], accept_multiple_files=True)
 
-# --- TRABAJO PERICIAL: CRUCE AUTOMÁTICO ---
+# --- CEREBRO PERICIAL ---
 if archivo_excel and archivos_pdf:
     df = pd.read_excel(archivo_excel)
-    st.success(f"Matriz cargada: {len(df)} registros detectados.")
-    st.info(f"PDFs cargados: {len(archivos_pdf)} archivos para el 3T 2025.")
-
-    # Mapeo de archivos para evitar el 404 interno
-    lista_pdfs = {f.name: f for f in archivos_pdf}
-
-    # --- ÁREA DE AUDITORÍA ---
-    st.subheader("📋 Validación de los 7 Puntos de Control")
+    pdfs_dict = {f.name: f for f in archivos_pdf}
     
-    fila_idx = st.number_input("Seleccione fila de la matriz para auditar:", 0, len(df)-1, 0)
-    fila = df.iloc[fila_idx]
+    # --- PANEL DE RESULTADOS RÁPIDOS (REVISIÓN PARCIAL) ---
+    st.subheader("⚡ Estado de la Pericia en Tiempo Real")
+    c1, c2, c3, c4 = st.columns(4)
     
-    col1, col2 = st.columns([1, 1])
+    # Lógica de Triangulación (Regla 1)
+    # Asumimos columnas: 'CP', 'CC', 'SPI', 'AMORTIZACION' (Ajustar nombres si varían)
+    df['DIFERENCIA'] = df.apply(lambda r: abs((r.get('CP', 0) - r.get('AMORTIZACION', 0)) - r.get('SPI', 0)), axis=1)
+    cuadra = df[df['DIFERENCIA'] < 0.01]
+    hallazgos_v = df[df['DIFERENCIA'] >= 0.01]
     
-    with col1:
-        st.write("**Datos de la Matriz (Excel):**")
-        st.json(fila.to_dict()) # Muestra CP, Fecha, Valor, etc.
-        
-        # EL ZOOM PERICIAL (Punto 3 y 4)
-        st.subheader("🔎 Zoom de Validación")
-        texto_confuso = st.text_input("Texto extraído del PDF (para normalizar):")
-        if texto_confuso:
-            limpio = re.sub(r'\s+', ' ', unicodedata.normalize("NFC", texto_confuso)).strip()
-            st.metric("Lectura Normalizada", limpio)
-            
-    with col2:
-        st.write("**Evidencia PDF:**")
-        # Buscador automático de PDF por número de CP
-        cp_buscado = str(fila['C. PAGO']) # Ajustar al nombre de tu columna
-        archivo_encontrado = next((name for name in lista_pdfs if cp_buscado in name), None)
-        
-        if archivo_encontrado:
-            st.success(f"✅ Documento encontrado: {archivo_encontrado}")
-            # Aquí el perito valida visualmente
-            st.download_button("Abrir PDF para Inspección", lista_pdfs[archivo_encontrado], file_name=archivo_encontrado)
-        else:
-            st.error(f"❌ HALLAZGO: No existe PDF para el CP {cp_buscado} en este cuatrimestre.")
+    # Lógica de Integridad (Regla 2)
+    vinculados = [cp for cp in df['C. PAGO'].astype(str) if any(cp in n for n in pdfs_dict.keys())]
+    
+    c1.metric("Registros Matriz", len(df))
+    c2.metric("PDFs Cargados", len(archivos_pdf))
+    c3.metric("Triangulación OK", f"{len(cuadra)}")
+    c4.metric("Archivos Vinculados", f"{len(vinculados)}")
 
-    # --- REGISTRO DE HALLAZGOS ---
+    # --- LISTA DE HALLAZGOS CRÍTICOS (REGLA 1 ESPECIAL) ---
+    if len(hallazgos_v) > 0:
+        with st.expander("🚨 ALERTAS DE TRIANGULACIÓN (CP vs CC vs SPI)"):
+            st.write("Registros donde el valor pagado no coincide (descontando amortizaciones):")
+            st.dataframe(hallazgos_v[['C. PAGO', 'BENEFICIARIO', 'DIFERENCIA']])
+
+    # --- ZOOM PERICIAL Y REVISIÓN LÍNEA A LÍNEA ---
     st.divider()
-    with st.expander("📝 Registrar Resultado de Pericia"):
-        c1, c2, c3 = st.columns(3)
-        res_cp = c1.selectbox("CP vs SPI", ["ok", "mal", "ilegible"])
-        res_cc = c2.selectbox("CC (Contabilización)", ["ok", "mal", "ilegible"])
-        res_fac = c3.selectbox("Factura/RUC", ["ok", "mal", "ilegible"])
+    idx = st.selectbox("🔍 Seleccione Registro para Inspección Documental:", range(len(df)))
+    fila = df.iloc[idx]
+    cp_num = str(fila.get('C. PAGO', ''))
+    
+    col_pdf, col_form = st.columns([1, 1])
+    
+    with col_pdf:
+        match = next((n for n in pdfs_dict.keys() if cp_num in n), None)
+        if match:
+            st.success(f"Archivo: {match}")
+            st.download_button("📂 Abrir Evidencia", pdfs_dict[match], file_name=match)
+        else:
+            st.error(f"❌ DOCUMENTO NO ENCONTRADO para CP {cp_num}")
+
+    with col_form:
+        st.info(f"**Validación de Datos - CP {cp_num}**")
+        st.write(f"Beneficiario: {fila.get('BENEFICIARIO', 'N/A')}")
         
-        obs = st.text_area("Columna de Hallazgos (Detalle su conclusión pericial):")
-        if st.button("GUARDAR EN MATRIZ FINAL"):
-            st.success(f"Registro guardado para el CP {cp_buscado}.")
+        # Zoom de normalización
+        zoom_txt = st.text_input("Normalizar texto confuso (Ej. Fecha/RUC):")
+        if zoom_txt:
+            limpio = re.sub(r'\s+', ' ', zoom_txt).strip()
+            st.code(f"Dato Normalizado: {limpio}")
+
+    # --- GENERADOR DE INFORME FINAL ---
+    st.divider()
+    if st.button("📝 GENERAR INFORME PERICIAL FINAL"):
+        st.markdown("### INFORME DE HALLAZGOS - EMAPAG 3T 2025")
+        st.write(f"- **Integridad:** Se detectaron {len(df) - len(vinculados)} registros sin respaldo PDF.")
+        st.write(f"- **Financiero:** {len(hallazgos_v)} inconsistencias en la triangulación de pagos.")
+        st.write(f"- **Periodo:** {len(df[df.astype(str).apply(lambda x: x.str.contains('2026')).any(axis=1)])} registros con error de año (2026).")
+        st.balloons()
 
 else:
-    st.warning("⚠️ Acción requerida: Sube el Excel y los PDFs en la barra lateral para comenzar el cruce.")
+    st.warning("📥 Esperando subida de Matriz y PDFs para iniciar peritaje...")
