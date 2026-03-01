@@ -2,139 +2,125 @@ import streamlit as st
 import pandas as pd
 import re
 import time
+import base64
+from io import BytesIO
 
-# --- PROTOCOLO ANTIGRAVITY / ALPHABET V43.2 ---
-st.set_page_config(page_title="SISTEMA PERICIAL V43.2 - CERTIFIED", layout="wide")
+# --- CONFIGURACIÓN V45 ---
+st.set_page_config(page_title="AUDITORÍA XAVIER V45", layout="wide")
 
-# Estabilización de Memoria y Estados
-if 'db_pericial' not in st.session_state: st.session_state.db_pericial = {}
+if 'db' not in st.session_state: st.session_state.db = {}
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 # --- SEGURIDAD ---
 if not st.session_state.auth:
-    st.title("🔐 Terminal Forense Xavier (Protocolo Alphabet)")
-    pw = st.text_input("Acceso Maestra (3T-2025):", type="password")
-    if st.button("DESBLOQUEAR"):
+    st.title("🔐 Terminal Forense")
+    pw = st.text_input("Clave:", type="password")
+    if st.button("ACCEDER"):
         if pw == "PERITO_EMAPAG_2025":
             st.session_state.auth = True
             st.rerun()
     st.stop()
 
-# --- NÚCLEO TÉCNICO ---
-def get_clean_id(t): return re.sub(r'\D', '', str(t))
+# --- UTILIDADES ---
+def clean_id(t): return re.sub(r'\D', '', str(t))
 
-def parse_money(val):
-    try:
-        s = str(val).replace('$', '').replace('.', '').replace(',', '.')
-        return float(s)
-    except: return 0.0
+def to_excel(df, veredictos):
+    # Fusiona la matriz con los hallazgos para el informe final
+    df_final = df.copy()
+    # Creamos columnas de resultados
+    df_final['ESTADO_PERICIAL'] = df_final.iloc[:, 0].apply(lambda x: veredictos.get(clean_id(x), {}).get('status', 'PENDIENTE'))
+    df_final['HALLAZGOS_DETALLES'] = df_final.iloc[:, 0].apply(lambda x: veredictos.get(clean_id(x), {}).get('obs', ''))
+    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_final.to_excel(writer, index=False, sheet_name='Informe_Forense')
+    return output.getvalue()
 
-# --- INTERFAZ PRINCIPAL ---
-st.title("🛡️ Auditoría Forense: Confrontación de Fidelidad 3T-2025")
+# --- INTERFAZ ---
+st.title("🛡️ Auditoría Forense: Confrontación y Reporte")
 
 with st.sidebar:
-    st.header("⚙️ Monitor Antigravity")
-    # Marcadores visuales de desempeño en tiempo real
-    m_index = st.empty()
-    m_map = st.empty()
-    m_net = st.empty()
+    st.header("⚙️ Carga de Datos")
+    ex_file = st.file_uploader("1. Matriz Excel", type=["xlsx"])
+    # Aumentamos estabilidad de carga masiva
+    pdf_files = st.file_uploader("2. Soportes PDFs", type=["pdf"], accept_multiple_files=True)
     
-    st.divider()
-    ex_file = st.file_uploader("1. Matriz Excel (3T-2025)", type=["xlsx"])
-    pdf_files = st.file_uploader("2. Soportes PDFs (150+)", type=["pdf"], accept_multiple_files=True)
-    
-    if st.button("🗑️ REINICIO TOTAL (Limpiar Memoria)"):
+    if st.button("🗑️ LIMPIAR TODO"):
         st.session_state.clear()
         st.rerun()
 
 if ex_file and pdf_files:
-    # FASE 1: INDEXACIÓN BINARIA (Bajo estándares Alphabet)
-    t_start = time.time()
-    # Usamos un diccionario para que la búsqueda sea instantánea O(1)
-    pdf_repo = {get_clean_id(f.name): f for f in pdf_files}
-    t_end_idx = time.time() - t_start
-    m_index.success(f"⚡ Indexación: {t_end_idx:.3f}s")
-
-    # FASE 2: MAPEO DE DATOS Y COLUMNAS
-    t_start_map = time.time()
+    # Indexación ultrarrápida
+    pdf_repo = {clean_id(f.name): f for f in pdf_files}
     df = pd.read_excel(ex_file)
-    cols = {str(c).upper().strip(): c for c in df.columns}
-    # Buscamos columnas críticas aunque cambien de nombre
-    c_cp = cols.get('C. PAGO') or cols.get('CP') or df.columns[0]
-    c_fec = cols.get('FECHA') or cols.get('EMISION')
-    t_end_map = time.time() - t_start_map
-    m_map.success(f"🔍 Mapeo Matriz: {t_end_map:.3f}s")
     
-    m_net.info("📡 Conexión: Estable")
+    # Identificar columna CP
+    c_cp = df.columns[0] # Por defecto la primera
+    for col in df.columns:
+        if 'CP' in str(col).upper() or 'PAGO' in str(col).upper():
+            c_cp = col
+            break
 
-    # --- TABLERO DE CONTROL ---
-    st.subheader("📊 Panel de Control del Peritaje")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Líneas Matriz", len(df))
-    c2.metric("PDFs en Búfer", len(pdf_files))
-    c3.metric("Revisados OK", sum(1 for v in st.session_state.db_pericial.values() if v['status'] == "OK"))
-    
-    # Alerta de Traslape: Detecta registros de 2024 o trimestres previos
-    traslape = df[df[c_fec].astype(str).str.contains("2024|1T|2T", na=False)]
-    c4.metric("Alertas de Periodo", len(traslape), delta_color="inverse")
+    # --- TABLERO ---
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Matriz", len(df))
+    c2.metric("PDFs", len(pdf_files))
+    c3.metric("Auditados", len(st.session_state.db))
 
-    # --- ZONA DE CONFRONTACIÓN FIEL ---
-    st.divider()
-    idx = st.selectbox("🎯 Registro a Auditar:", range(len(df)), 
+    # --- SELECTOR ---
+    idx = st.selectbox("🎯 Seleccionar Registro:", range(len(df)), 
                        format_func=lambda x: f"Fila {x+1} | ID CP: {df.iloc[x][c_cp]}")
     
     fila = df.iloc[idx]
-    id_actual = get_clean_id(fila[c_cp])
+    id_actual = clean_id(fila[c_cp])
     
-    izq, der = st.columns([1.2, 1])
+    col_pdf, col_data = st.columns([1.5, 1])
 
-    with izq:
-        st.subheader("📄 Evidencia Digital")
+    with col_pdf:
+        st.subheader("🖼️ Visor de Evidencia")
         if id_actual in pdf_repo:
-            archivo = pdf_repo[id_actual]
-            st.success(f"Vinculado con éxito: {archivo.name}")
-            st.download_button("📂 Abrir PDF para Inspección", archivo, file_name=archivo.name)
-            
-            with st.expander("📝 Protocolo Xavier (7 Pasos de Validación)", expanded=True):
-                v1 = st.checkbox("1. CP y CC coinciden (PDF vs Excel)")
-                v2 = st.checkbox("2. Origen (Factura/Nómina/Subrogación) coincide")
-                v3 = st.checkbox("3. Aritmética (Subtotal/IVA 15%) coincide")
-                st.caption("Ecuación SPI: Total - Retenciones - Amortizaciones - Multas")
-                v4 = st.checkbox("4. Liquidación: El residuo es igual al SPI del Excel")
-                v5 = st.checkbox("5. Contabilidad: Debe/Haber (Deducciones) fiel en Excel")
-                
-                hallazgo = st.text_area("Notas periciales y hallazgos:")
-                if st.button("💾 REGISTRAR VEREDICTO"):
-                    st.session_state.db_pericial[id_actual] = {
-                        "status": "OK" if (v1 and v2 and v3 and v4 and v5) else "ERROR",
-                        "obs": hallazgo,
-                        "timestamp": time.strftime("%H:%M:%S")
-                    }
-                    st.success("Resultado guardado en el reporte parcial.")
-                    st.rerun()
+            f = pdf_repo[id_actual]
+            base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+            pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700" type="application/pdf"></iframe>'
+            st.markdown(pdf_display, unsafe_allow_html=True)
+            # Reset del puntero para que no se pierda el archivo en la siguiente lectura
+            f.seek(0)
         else:
-            st.error(f"❌ HALLAZGO: No existe respaldo PDF para el ID {fila[c_cp]}")
+            st.error(f"⚠️ HALLAZGO CONFIRMADO: El ID {id_actual} no tiene respaldo físico en la carga.")
 
-    with der:
-        st.subheader("📜 Datos en Matriz")
+    with col_data:
+        st.subheader("🖋️ Verificación")
         st.write(fila.dropna())
-        # Alerta visual de periodo anterior
-        if id_actual in traslape[c_cp].astype(str).apply(get_clean_id).values:
-            st.warning("🚨 ALERTA: Este registro pertenece a un periodo anterior (2024/1T/2T).")
+        
+        with st.form("pericia"):
+            v_ok = st.radio("Veredicto:", ["PENDIENTE", "CONFORME", "CON HALLAZGO"])
+            obs = st.text_area("Notas del Perito:")
+            if st.form_submit_button("💾 GUARDAR"):
+                st.session_state.db[id_actual] = {"status": v_ok, "obs": obs}
+                st.rerun()
 
-    # --- REPORTES Y CIERRE ---
+    # --- INFORMES (LA PARTE QUE FALTABA) ---
     st.divider()
-    col_parcial, col_final = st.columns(2)
+    st.subheader("📊 Generación de Entregables")
     
-    if col_parcial.button("📄 INFORME PARCIAL DE AVANCE"):
-        st.write("### Hallazgos Acumulados")
-        st.dataframe(pd.DataFrame.from_dict(st.session_state.db_pericial, orient='index'))
-    
-    if col_final.button("🏆 INFORME FINAL DE CIERRE"):
-        st.balloons()
-        st.header("📋 Certificado de Fidelidad de Auditoría")
-        st.write(f"Revisiones completadas: {len(st.session_state.db_pericial)}")
-        st.write("El informe está listo para su exportación.")
+    if st.session_state.db:
+        col_inf1, col_inf2 = st.columns(2)
+        
+        with col_inf1:
+            st.write("1. Vista previa de auditados:")
+            st.dataframe(pd.DataFrame.from_dict(st.session_state.db, orient='index'))
+            
+        with col_inf2:
+            st.write("2. Descargar Matriz Auditada (Final):")
+            excel_data = to_excel(df, st.session_state.db)
+            st.download_button(
+                label="📥 DESCARGAR EXCEL DE HALLAZGOS",
+                data=excel_data,
+                file_name=f"Informe_Pericial_3T_2025.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    else:
+        st.info("Guarde al menos un veredicto para generar el informe.")
 
 else:
-    st.info("💡 Terminal lista. Cargue la Matriz y los PDFs para activar el protocolo de seguridad Antigravity.")
+    st.info("Esperando carga de archivos...")
