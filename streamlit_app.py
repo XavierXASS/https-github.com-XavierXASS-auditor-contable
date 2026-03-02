@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # ==============================================
-#  Auditoría Forense - Visor Pericial Integrado
-#  Archivo: streamlit_app.py (robusto + progreso)
-#  Versión: estable
+#  Auditoría Forense - Confirmación + Progreso
+#  Archivo: streamlit_app.py
+#  Versión: confirm + progress + errores visibles
 # ==============================================
 
 import base64
@@ -10,6 +10,7 @@ import re
 import time
 from datetime import datetime
 import unicodedata
+import traceback
 
 import pandas as pd
 import streamlit as st
@@ -21,22 +22,37 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="SISTEMA PERICIAL - VISOR INTEGRADO", layout="wide")
 
 # -------------------------
-# ESTADO INICIAL (evita NameError)
+# ESTADO INICIAL ROBUSTO
 # -------------------------
-if "db_pericial" not in st.session_state:
-    st.session_state.db_pericial = {}
-# Estos dos garantizan que NUNCA falten, aunque la app recargue:
-if "ex_file" not in st.session_state:
-    st.session_state.ex_file = None
-if "pdf_files" not in st.session_state:
-    st.session_state.pdf_files = []
+def init_state():
+    defaults = {
+        "db_pericial": {},
+        "ex_file": None,
+        "pdf_files": [],
+        "confirm_answer": "No",     # "Sí" / "No"
+        "confirmed": False,
+        "processing": False,
+        "process_done": False,
+        "index_rows": [],
+        "cross_rows": [],
+        "leftovers": [],
+        "pdf_index": {},
+        "df_cache": None,
+        "c_cp": None,
+        "c_fec": None,
+        "last_error": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_state()
 
 # -------------------------
 # UTILIDADES
 # -------------------------
-def get_clean_id(texto) -> str:
-    """Solo dígitos, sin ceros a la izquierda (para empatar CP)."""
-    s = re.sub(r"\D", "", str(texto))
+def get_clean_id(x) -> str:
+    s = re.sub(r"\D", "", str(x))
     return s.lstrip("0") or s
 
 def _norm(s: str) -> str:
@@ -46,7 +62,6 @@ def _norm(s: str) -> str:
     return s
 
 def find_col(df: pd.DataFrame, candidates: list[str], required: bool = True):
-    """Busca columna por nombres aproximados."""
     norm_map = {_norm(c): c for c in df.columns}
     for cand in candidates:
         if cand in norm_map:
@@ -55,7 +70,7 @@ def find_col(df: pd.DataFrame, candidates: list[str], required: bool = True):
         if any(c in k for c in candidates):
             return v
     if required:
-        raise KeyError(f"No se encontró ninguna de las columnas: {candidates}")
+        raise KeyError(f"No se encontró ninguna columna similar a: {candidates}")
     return None
 
 @st.cache_data(show_spinner=False)
@@ -63,219 +78,278 @@ def to_base64_pdf(file_bytes: bytes) -> str:
     return base64.b64encode(file_bytes).decode("utf-8")
 
 def display_pdf(uploaded_file):
-    """Muestra el PDF dentro de la app mediante iframe."""
+    """Muestra el PDF mediante iframe correcto (no texto escapado)."""
     try:
         uploaded_file.seek(0)
     except Exception:
         pass
-    file_bytes = uploaded_file.read()
-    if not file_bytes:
-        st.error("No se pudo leer el PDF (buffer vacío). Vuelva a cargar el archivo.")
+    fb = uploaded_file.read()
+    if not fb:
+        st.error("El PDF está vacío o no se pudo leer.")
         return
-    base64_pdf = to_base64_pdf(file_bytes)
-    html = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="860" style="border:none;"></iframe>'
-    components.html(html, height=860, scrolling=True)
+    b64 = to_base64_pdf(fb)
+    iframe_html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="880"></iframe>'
+    components.html(iframe_html, height=900, scrolling=True)
 
 # -------------------------
-# INTERFAZ PRINCIPAL
+# SIDEBAR: CARGA + CONFIRMACIÓN
 # -------------------------
-st.title("🛡️ Auditoría Forense: Confrontación en Pantalla")
-
 with st.sidebar:
     st.header("⚙️ Panel de Control")
-    m_index = st.empty()
-    m_map = st.empty()
 
+    ex_new = st.file_uploader("Matriz Excel (.xlsx)", type=["xlsx"], key="excel_up",
+                              disabled=st.session_state.confirmed or st.session_state.processing)
+    pdfs_new = st.file_uploader("Soportes PDFs (múltiples)", type=["pdf"], accept_multiple_files=True, key="pdfs_up",
+                                disabled=st.session_state.confirmed or st.session_state.processing)
+
+    if ex_new is not None:
+        st.session_state.ex_file = ex_new
+    if pdfs_new is not None and len(pdfs_new) > 0:
+        st.session_state.pdf_files = pdfs_new
+
+    # Confirmación explícita
+    st.subheader("❓ ¿Son todos los archivos?")
+    st.session_state.confirm_answer = st.radio(
+        "Confirma para iniciar el procesamiento",
+        options=["No", "Sí"], horizontal=True, label_visibility="collapsed",
+        index=(1 if st.session_state.confirm_answer == "Sí" else 0),
+        disabled=st.session_state.processing or st.session_state.process_done
+    )
+
+    # Parámetros de periodo
     st.divider()
-    # Cargadores con claves propias y guardado en session_state
-    ex_file_new = st.file_uploader("1. Matriz Excel", type=["xlsx"], key="excel_uploader")
-    pdf_files_new = st.file_uploader("2. Soportes PDFs", type=["pdf"], accept_multiple_files=True, key="pdf_uploader")
-
-    # Si llegan archivos nuevos, los guardamos en session_state
-    if ex_file_new is not None:
-        st.session_state.ex_file = ex_file_new
-    if pdf_files_new is not None and len(pdf_files_new) > 0:
-        st.session_state.pdf_files = pdf_files_new
-
-    # Parámetros de periodo (para alertas)
     anio_actual = datetime.now().year
-    anio_objetivo = st.number_input("Año objetivo", min_value=2000, max_value=2100, value=anio_actual, step=1)
-    trimestre_opt = st.selectbox("Trimestre objetivo", ["Cualquiera", "1", "2", "3", "4"], index=0)
-    trimestre_objetivo = None if trimestre_opt == "Cualquiera" else int(trimestre_opt)
+    st.session_state.anio_obj = st.number_input(
+        "Año objetivo", min_value=2000, max_value=2100, value=anio_actual, step=1,
+        disabled=st.session_state.processing
+    )
+    tri_opt = st.selectbox("Trimestre objetivo", ["Cualquiera","1","2","3","4"], index=0,
+                           disabled=st.session_state.processing)
+    st.session_state.tri_obj = None if tri_opt == "Cualquiera" else int(tri_opt)
 
-    if st.button("🗑️ REINICIO TOTAL"):
+    # Botones
+    can_start = (
+        st.session_state.ex_file is not None and
+        len(st.session_state.pdf_files) > 0 and
+        st.session_state.confirm_answer == "Sí" and
+        (not st.session_state.processing) and
+        (not st.session_state.process_done)
+    )
+    if st.button("✅ Procesar ahora", type="primary", use_container_width=True, disabled=not can_start):
+        st.session_state.confirmed = True
+        st.session_state.processing = True
+        st.session_state.process_done = False
+        st.session_state.last_error = None
+
+    if st.button("🗑️ Reinicio total", use_container_width=True, disabled=st.session_state.processing):
         st.session_state.clear()
         st.rerun()
 
-# Recuperamos SIEMPRE desde session_state (garantiza existencia)
-ex_file = st.session_state.ex_file
-pdf_files = st.session_state.pdf_files
+# -------------------------
+# CABECERA + ESTADO EN VIVO
+# -------------------------
+st.title("🛡️ Auditoría Forense: Confrontación en Pantalla")
+st.divider()
+c1, c2, c3 = st.columns([1,1,2])
+with c1: st.metric("PDFs detectados", len(st.session_state.pdf_files))
+with c2: st.metric("¿Excel detectado?", "Sí" if st.session_state.ex_file is not None else "No")
+with c3:
+    if st.session_state.last_error:
+        st.error("La ejecución anterior terminó con error. Revise el detalle más abajo.")
+    elif st.session_state.ex_file is None and len(st.session_state.pdf_files) == 0:
+        st.info("Sube la **Matriz .xlsx** y **los PDFs**. Luego marca **Sí** y pulsa **“✅ Procesar ahora”**.")
+    elif st.session_state.ex_file is None:
+        st.warning("Falta la **Matriz .xlsx**.")
+    elif len(st.session_state.pdf_files) == 0:
+        st.warning("Faltan **PDFs**.")
+    elif not st.session_state.confirmed:
+        st.success("Todo listo. Marca **Sí** y pulsa **“✅ Procesar ahora”**.")
+    elif st.session_state.processing:
+        st.info("Procesando… no cierres esta página.")
+    elif st.session_state.process_done:
+        st.success("Preparación completada.")
 
 # -------------------------
-# PREPARACIÓN Y PROGRESO
+# PREPARACIÓN (con progreso y captura de errores)
 # -------------------------
-if ex_file is not None and len(pdf_files) > 0:
-    t_start = time.time()
+def run_preparation():
+    t0 = time.time()
+    status = st.status("Iniciando…", expanded=True)
+    bar = st.progress(0)
+    log = st.empty()
 
-    # Panel de estado y progreso
-    st.subheader("⏱️ Progreso de preparación")
-    status = st.status("Preparando insumos…", expanded=True)
-    progress = st.progress(0)
-    log_area = st.empty()   # última línea de log
-
-    def log(msg: str, level: str = "info"):
-        icon = {"info": "ℹ️", "ok": "✅", "warn": "⚠️", "err": "❌"}.get(level, "ℹ️")
-        log_area.write(f"{icon} {msg}")
-
-    # ---- FASE 1: INDEXACIÓN DE PDFs ----
+    # 1) Indexar PDFs por CP
+    status.update(label="Indexando PDFs por CP…", state="running")
     CP_PAT = re.compile(r"CP[_\-\s]?(\d+)", re.IGNORECASE)
 
-    def extract_cp_from_name(name: str):
+    def extract_cp(name: str):
         m = CP_PAT.search(name)
         if m:
             return m.group(1).lstrip("0") or "0"
-        digits = re.sub(r"\D", "", name)
-        return digits.lstrip("0") or None
+        d = re.sub(r"\D", "", name)
+        return d.lstrip("0") or None
 
-    total_pdfs = len(pdf_files)
+    pdf_files = st.session_state.pdf_files
+    total = len(pdf_files)
     pdf_index = {}
-    resultados_index = []
+    idx_rows = []
 
-    status.update(label="Indexando PDFs…", state="running")
     for i, f in enumerate(pdf_files, start=1):
         try:
-            cp_id = extract_cp_from_name(f.name)
+            cp_id = extract_cp(f.name)
+            size_mb = None
+            try:
+                size_mb = round(getattr(f, "size", 0) / (1024*1024), 3)
+            except Exception:
+                pass
             if not cp_id:
-                resultados_index.append({"archivo": f.name, "cp_extraido": None, "estado": "SIN_CP_EN_NOMBRE"})
-                if i % 10 == 0 or i == total_pdfs:
-                    log(f"Sin CP en nombre: {f.name}", "warn")
-                continue
-            pdf_index.setdefault(cp_id, []).append(f)
-            resultados_index.append({"archivo": f.name, "cp_extraido": cp_id, "estado": "OK"})
-            if i % 10 == 0 or i == total_pdfs:
-                log(f"Indexados {i}/{total_pdfs} PDFs (CP actual: {cp_id})", "info")
+                idx_rows.append({"archivo": f.name, "cp_extraido": None, "estado": "SIN_CP_EN_NOMBRE", "tam_MB": size_mb})
+            else:
+                pdf_index.setdefault(cp_id, []).append(f)
+                idx_rows.append({"archivo": f.name, "cp_extraido": cp_id, "estado": "OK", "tam_MB": size_mb})
         except Exception as e:
-            resultados_index.append({"archivo": f.name, "cp_extraido": None, "estado": f"ERROR: {e}"})
-            log(f"Error indexando {f.name}: {e}", "err")
-        progress.progress(int(i * 100 / max(1, total_pdfs)))
+            idx_rows.append({"archivo": f.name, "cp_extraido": None, "estado": f"ERROR: {e}", "tam_MB": None})
+        if i % 10 == 0 or i == total:
+            log.write(f"Indexados {i}/{total} PDFs…")
+        bar.progress(int(i * 100 / max(1, total)))
 
-    # ---- FASE 2: LECTURA DE MATRIZ ----
-    status.update(label="Leyendo matriz Excel…", state="running")
+    # 2) Leer Excel
+    status.update(label="Leyendo matriz (.xlsx)…", state="running")
     try:
-        df = pd.read_excel(ex_file)
-        log(f"Matriz cargada con {len(df)} filas.", "ok")
+        df = pd.read_excel(st.session_state.ex_file)
     except Exception as e:
-        status.update(label=f"Error leyendo Excel: {e}", state="error")
-        st.error(f"No se pudo leer el Excel: {e}")
-        st.stop()
+        status.update(label="Error leyendo matriz", state="error")
+        st.session_state.last_error = f"Lectura Excel: {e}"
+        st.exception(e)
+        st.session_state.processing = False
+        return
 
-    # Detección de columnas
+    # 3) Detectar columnas
     try:
-        c_cp = find_col(df, ["CP", "CPAGO", "COMPAGO", "COMPROBANTE"])
+        c_cp = find_col(df, ["CP","CPAGO","COMPAGO","COMPROBANTE"])
     except KeyError:
-        c_cp = df.columns[0]  # fallback
-        st.toast("Usando la primera columna como CP (no se halló 'CP').", icon="⚠️")
-
+        c_cp = df.columns[0]
+        st.toast("No se halló columna CP; se usará la primera columna.", icon="⚠️")
     try:
-        c_fec = find_col(df, ["FECHA", "EMISION", "FECEMISION", "FECDOC"], required=False)
+        c_fec = find_col(df, ["FECHA","EMISION","FECEMISION","FECDOC"], required=False)
     except KeyError:
         c_fec = None
 
-    # ---- TABLERO ----
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Líneas Matriz", len(df))
-    c2.metric("PDFs en Búfer", total_pdfs)
-    c3.metric("Revisados OK", sum(1 for v in st.session_state.db_pericial.values() if v.get("Resultado_Final") == "OK"))
-
+    # 4) Tablero rápido
+    cc1, cc2, cc3, cc4 = st.columns(4)
+    cc1.metric("Filas matriz", len(df))
+    cc2.metric("PDFs en buffer", len(pdf_files))
+    cc3.metric("Revisados OK", sum(1 for v in st.session_state.db_pericial.values() if v.get("Resultado_Final")=="OK"))
     if c_fec:
         fec = pd.to_datetime(df[c_fec], errors="coerce")
         df["_ANIO"] = fec.dt.year
         df["_TRIM"] = fec.dt.quarter
-        if trimestre_objetivo is None:
-            traslape = df[df["_ANIO"] != anio_objetivo]
+        anio_obj = st.session_state.anio_obj
+        tri_obj = st.session_state.tri_obj
+        if tri_obj is None:
+            traslape = df[df["_ANIO"] != anio_obj]
         else:
-            traslape = df[(df["_ANIO"] != anio_objetivo) | (df["_TRIM"] != trimestre_objetivo)]
-        c4.metric("Alertas de Periodo", len(traslape), delta_color="inverse")
+            traslape = df[(df["_ANIO"] != anio_obj) | (df["_TRIM"] != tri_obj)]
+        cc4.metric("Alertas de periodo", len(traslape), delta_color="inverse")
     else:
         traslape = pd.DataFrame()
-        c4.metric("Alertas de Periodo", 0)
+        cc4.metric("Alertas de periodo", 0)
 
-    # ---- FASE 3: CRUCE MATRIZ vs PDFs ----
-    status.update(label="Cruzando Matriz vs PDFs…", state="running")
-    cruce_result = []
-    faltantes = 0
+    # 5) Cruce matriz ↔ PDFs
+    status.update(label="Cruzando Matriz ↔ PDFs…", state="running")
+    cr_rows = []
     for i in range(len(df)):
         fila_cp = str(df.iloc[i][c_cp])
         id_cp = get_clean_id(fila_cp)
-        candidatos = pdf_index.get(id_cp, [])
-        tiene = len(candidatos) > 0
-        cruce_result.append({
-            "fila": i + 1,
-            "cp_matriz": fila_cp,
-            "cp_id": id_cp,
-            "pdfs_encontrados": len(candidatos),
-            "estado": "OK" if tiene else "SIN_PDF"
+        encontrados = len(pdf_index.get(id_cp, []))
+        cr_rows.append({
+            "fila": i+1, "cp_matriz": fila_cp, "cp_id": id_cp,
+            "pdfs_encontrados": encontrados,
+            "estado": "OK" if encontrados > 0 else "SIN_PDF"
         })
-        if not tiene:
-            faltantes += 1
-        if (i + 1) % 20 == 0 or (i + 1) == len(df):
-            log(f"Cruzando fila {i+1}/{len(df)} (CP {id_cp})", "info")
-        progress.progress(int((i + 1) * 100 / max(1, len(df))))
+        if (i+1) % 20 == 0 or (i+1) == len(df):
+            log.write(f"Cruce {i+1}/{len(df)} (CP {id_cp})…")
+        bar.progress(int((i+1) * 100 / max(1, len(df))))
 
-    # PDFs sobrantes (con CP no presente en la matriz)
-    set_matriz = { get_clean_id(df.iloc[i][c_cp]) for i in range(len(df)) }
-    sobrantes = []
+    # 6) PDFs sobrantes
+    set_mat = {get_clean_id(df.iloc[i][c_cp]) for i in range(len(df))}
+    leftovers = []
     for cp_id, files in pdf_index.items():
-        if cp_id not in set_matriz:
+        if cp_id not in set_mat:
             for f in files:
-                sobrantes.append({"archivo": f.name, "cp_id": cp_id, "estado": "PDF_SIN_FILA"})
+                leftovers.append({"archivo": f.name, "cp_id": cp_id, "estado": "PDF_SIN_FILA"})
+
+    # 7) Guardar resultados
+    st.session_state.index_rows = idx_rows
+    st.session_state.cross_rows = cr_rows
+    st.session_state.leftovers = leftovers
+    st.session_state.pdf_index = pdf_index
+    st.session_state.df_cache = df
+    st.session_state.c_cp = c_cp
+    st.session_state.c_fec = c_fec
+    st.session_state.last_error = None
 
     status.update(
-        label=f"Preparación completa en {time.time()-t_start:.1f} s — Faltantes: {faltantes} | Sobrantes: {len(sobrantes)}",
+        label=f"Preparación lista en {time.time()-t0:.1f}s — Faltantes: {(pd.DataFrame(cr_rows)['estado']=='SIN_PDF').sum()} | Sobrantes: {len(leftovers)}",
         state="complete"
     )
-    st.toast("Carga y cruce terminados.", icon="✅")
+    st.toast("Preparación completada.", icon="✅")
 
-    # ---- RESÚMENES ----
+    st.session_state.processing = False
+    st.session_state.process_done = True
+
+# Disparo del proceso (cuando confirmas “Sí” y pulsas el botón)
+try:
+    if st.session_state.processing and not st.session_state.process_done and st.session_state.confirmed:
+        run_preparation()
+except Exception as e:
+    st.session_state.last_error = f"Excepción en preparación: {e}"
+    st.error("Ocurrió un error durante el procesamiento. Detalle abajo.")
+    st.exception(e)
+    st.code("".join(traceback.format_exc()), language="python")
+    st.session_state.processing = False
+    st.session_state.process_done = False
+
+# -------------------------
+# RESÚMENES + VISOR + FORM (cuando termina)
+# -------------------------
+if st.session_state.process_done and st.session_state.df_cache is not None:
+    df = st.session_state.df_cache
+    c_cp = st.session_state.c_cp
+    pdf_index = st.session_state.pdf_index
+
     st.divider()
-    st.markdown("### 📋 Resumen de Indexación de PDFs")
-    st.dataframe(pd.DataFrame(resultados_index), use_container_width=True, hide_index=True)
+    st.markdown("### 📋 Indexación de PDFs")
+    df_idx = pd.DataFrame(st.session_state.index_rows)
+    st.dataframe(df_idx, use_container_width=True, hide_index=True)
 
-    st.markdown("### 🔎 Cruce Matriz ↔ PDFs (por fila)")
-    st.dataframe(pd.DataFrame(cruce_result), use_container_width=True, hide_index=True)
+    st.markdown("### 🔎 Cruce Matriz ↔ PDFs")
+    df_cru = pd.DataFrame(st.session_state.cross_rows)
+    st.dataframe(df_cru, use_container_width=True, hide_index=True)
 
-    if sobrantes:
+    if st.session_state.leftovers:
         st.markdown("### 🗂️ PDFs sin fila asociada (Sobrantes)")
-        st.dataframe(pd.DataFrame(sobrantes), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(st.session_state.leftovers), use_container_width=True, hide_index=True)
 
     colx, coly, colz = st.columns(3)
     with colx:
-        st.download_button(
-            "⬇️ Indexación (CSV)",
-            data=pd.DataFrame(resultados_index).to_csv(index=False).encode("utf-8"),
-            file_name="indexacion_pdfs.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        st.download_button("⬇️ Indexación (CSV)",
+                           data=df_idx.to_csv(index=False).encode("utf-8"),
+                           file_name="indexacion_pdfs.csv", mime="text/csv",
+                           use_container_width=True)
     with coly:
-        st.download_button(
-            "⬇️ Cruce Matriz ↔ PDFs (CSV)",
-            data=pd.DataFrame(cruce_result).to_csv(index=False).encode("utf-8"),
-            file_name="cruce_matriz_pdfs.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        st.download_button("⬇️ Cruce (CSV)",
+                           data=df_cru.to_csv(index=False).encode("utf-8"),
+                           file_name="cruce_matriz_pdfs.csv", mime="text/csv",
+                           use_container_width=True)
     with colz:
-        if sobrantes:
-            st.download_button(
-                "⬇️ PDFs Sobrantes (CSV)",
-                data=pd.DataFrame(sobrantes).to_csv(index=False).encode("utf-8"),
-                file_name="pdfs_sobrantes.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+        if st.session_state.leftovers:
+            st.download_button("⬇️ Sobrantes (CSV)",
+                               data=pd.DataFrame(st.session_state.leftovers).to_csv(index=False).encode("utf-8"),
+                               file_name="pdfs_sobrantes.csv", mime="text/csv",
+                               use_container_width=True)
 
-    # ---- FLUJO NORMAL: Selección + Visor + Formulario ----
+    # Visor + selección + formulario
     st.divider()
     idx = st.selectbox(
         "🎯 Registro a Auditar:",
@@ -286,97 +360,75 @@ if ex_file is not None and len(pdf_files) > 0:
     id_actual = get_clean_id(fila[c_cp])
 
     col_pdf, col_form = st.columns([1.5, 1])
-
     with col_pdf:
         st.subheader("🖼️ Visor de Evidencia")
-        candidatos = pdf_index.get(id_actual, [])
-        if len(candidatos) == 0:
-            st.error(f"❌ DOCUMENTO NO ENCONTRADO PARA CP: {fila[c_cp]}")
-            st.info("Verifique que el nombre del PDF contenga el número de CP.")
-        elif len(candidatos) == 1:
-            display_pdf(candidatos[0])
+        cand = pdf_index.get(id_actual, [])
+        if len(cand) == 0:
+            st.error(f"❌ Sin PDF para CP: {fila[c_cp]}")
+        elif len(cand) == 1:
+            display_pdf(cand[0])
         else:
-            nombre = st.selectbox(
-                "Se encontraron múltiples PDFs para este CP. Selecciona uno:",
-                [f.name for f in candidatos]
-            )
-            sel = next(x for x in candidatos if x.name == nombre)
+            nombre = st.selectbox("Múltiples PDFs para este CP", [f.name for f in cand])
+            sel = next(x for x in cand if x.name == nombre)
             display_pdf(sel)
 
     with col_form:
         st.subheader("🖋️ Veredicto y Datos")
         st.dataframe(fila.to_frame("Valor").head(10), use_container_width=True)
 
-        if not traslape.empty:
-            try:
-                en_traslape = any(get_clean_id(x) == id_actual for x in traslape[c_cp].astype(str).tolist())
-                if en_traslape:
-                    st.warning("🚨 REGISTRO FUERA DEL PERIODO OBJETIVO")
-            except Exception:
-                pass
-
         with st.form(key="form_auditoria", clear_on_submit=False):
             st.markdown("### Validaciones por documento")
-
-            # --- CP ---
-            st.subheader("Comprobante de Pago (CP)")
+            # CP
+            st.subheader("CP")
             cp_num_pdf = st.text_input("Número de CP (PDF)", value="")
             cp_fecha_pdf = st.text_input("Fecha CP (PDF)", value="")
             cp_valor_pdf = st.number_input("Valor CP (PDF)", min_value=0.0, step=0.01, format="%.2f")
-            cp_ok = st.selectbox("Validación CP (coincide con matriz)", ["OK", "MAL", "NO-LEÍBLE"], index=0)
-
-            # --- CC ---
-            st.subheader("Comprobante Contable (CC)")
+            cp_ok = st.selectbox("Validación CP", ["OK","MAL","NO-LEÍBLE"], index=0)
+            # CC
+            st.subheader("CC")
             cc_num_pdf = st.text_input("Número de CC (PDF)", value="")
             cc_fecha_pdf = st.text_input("Fecha CC (PDF)", value="")
-            cc_valor_debe = st.number_input("Valor en Debe (pago)", min_value=0.0, step=0.01, format="%.2f")
-            cc_amort_anticipo = st.number_input("Amortización de anticipo (si aplica)", min_value=0.0, step=0.01, format="%.2f")
-            cc_multas = st.number_input("Multas (si aplica)", min_value=0.0, step=0.01, format="%.2f")
-            cc_ok = st.selectbox("Validación CC", ["OK", "MAL", "NO-LEÍBLE"], index=0)
-
-            # --- Factura ---
+            cc_valor_debe = st.number_input("Valor Debe (pago)", min_value=0.0, step=0.01, format="%.2f")
+            cc_amort_anticipo = st.number_input("Amortización anticipo", min_value=0.0, step=0.01, format="%.2f")
+            cc_multas = st.number_input("Multas", min_value=0.0, step=0.01, format="%.2f")
+            cc_ok = st.selectbox("Validación CC", ["OK","MAL","NO-LEÍBLE"], index=0)
+            # Factura
             st.subheader("Factura")
-            fac_ruc = st.text_input("RUC Proveedor (PDF/CP/CC)", value="")
-            fac_num = st.text_input("Número de Factura (PDF)", value="")
-            fac_fecha = st.text_input("Fecha de Factura (PDF)", value="")
-            fac_subtotal = st.number_input("Subtotal (PDF)", min_value=0.0, step=0.01, format="%.2f")
-            fac_iva_pct = st.number_input("IVA % (PDF)", min_value=0.0, step=0.01, format="%.2f")
-            fac_iva_val = st.number_input("IVA Valor (PDF)", min_value=0.0, step=0.01, format="%.2f")
-            fac_total = st.number_input("Total Factura (PDF)", min_value=0.0, step=0.01, format="%.2f")
-            fac_ok = st.selectbox("Validación Cálculos Factura", ["OK", "MAL", "NO-LEÍBLE"], index=0)
-
-            # --- Retención ---
-            st.subheader("Comprobante de Retención")
-            ret_num = st.text_input("Número Retención (PDF)", value="")
+            fac_ruc = st.text_input("RUC", value="")
+            fac_num = st.text_input("Número de Factura", value="")
+            fac_fecha = st.text_input("Fecha de Factura", value="")
+            fac_subtotal = st.number_input("Subtotal", min_value=0.0, step=0.01, format="%.2f")
+            fac_iva_pct = st.number_input("IVA %", min_value=0.0, step=0.01, format="%.2f")
+            fac_iva_val = st.number_input("IVA Valor", min_value=0.0, step=0.01, format="%.2f")
+            fac_total = st.number_input("Total", min_value=0.0, step=0.01, format="%.2f")
+            fac_ok = st.selectbox("Validación Factura", ["OK","MAL","NO-LEÍBLE"], index=0)
+            # Retención
+            st.subheader("Retención")
+            ret_num = st.text_input("Número Retención", value="")
             ret_renta_pct = st.number_input("% Renta", min_value=0.0, step=0.01, format="%.2f")
-            ret_renta_val = st.number_input("Valor Renta Retenida", min_value=0.0, step=0.01, format="%.2f")
+            ret_renta_val = st.number_input("Valor Renta", min_value=0.0, step=0.01, format="%.2f")
             ret_iva_pct = st.number_input("% IVA Retenido", min_value=0.0, step=0.01, format="%.2f")
             ret_iva_val = st.number_input("Valor IVA Retenido", min_value=0.0, step=0.01, format="%.2f")
-            ret_ok = st.selectbox("Validación Retención", ["OK", "MAL", "NO-LEÍBLE"], index=0)
-
-            # --- SPI ---
-            st.subheader("SPI (BCE)")
+            ret_ok = st.selectbox("Validación Retención", ["OK","MAL","NO-LEÍBLE"], index=0)
+            # SPI
+            st.subheader("SPI")
             spi_benef = st.text_input("Beneficiario (SPI)", value="")
             spi_valor = st.number_input("Valor Pagado (SPI)", min_value=0.0, step=0.01, format="%.2f")
-            spi_ok = st.selectbox("Validación SPI (coincidencias de beneficiario/valor)", ["OK", "MAL", "NO-LEÍBLE"], index=0)
-
-            # --- Coincidencias y alertas ---
-            st.subheader("Cruces y Alertas")
-            coincide_valores = st.selectbox("¿CP = CC = SPI (valor)?", ["Sí", "No", "No determinable"], index=0)
+            spi_ok = st.selectbox("Validación SPI", ["OK","MAL","NO-LEÍBLE"], index=0)
+            # Cruces y Hallazgos
+            st.subheader("Cruces y Hallazgos")
+            coincide_valores = st.selectbox("¿CP = CC = SPI (valor)?", ["Sí","No","No determinable"], index=0)
             fuera_anio = st.checkbox("Factura fuera del año en curso")
             fuera_trimestre = st.checkbox("Factura fuera del trimestre analizado")
             falta_pdf = st.checkbox("Falta PDF para esta línea")
             sobra_pdf = st.checkbox("Existe PDF sin línea asociada")
-
-            # --- Resultado y hallazgos ---
-            hallazgos = st.text_area("Hallazgos (detalle técnico)")
-            claridad = st.slider("Claridad de lectura / evidencia (1= baja, 10= alta)", 1, 10, 7)
-            resultado_final = st.selectbox("Resultado final", ["OK", "MAL", "NO-LEÍBLE", "INCOMPLETO"], index=0)
+            hallazgos = st.text_area("Hallazgos")
+            claridad = st.slider("Claridad (1–10)", 1, 10, 7)
+            resultado_final = st.selectbox("Resultado final", ["OK","MAL","NO-LEÍBLE","INCOMPLETO"], index=0)
 
             submit = st.form_submit_button("💾 GUARDAR RESULTADO")
-
             if submit:
-                clave = f"{id_actual}::fila{idx+1}"
+                clave = f"{get_clean_id(fila[c_cp])}::fila{idx+1}"
                 st.session_state.db_pericial[clave] = {
                     "CP_Num_Matriz": str(fila[c_cp]),
                     "CP_Num_PDF": cp_num_pdf, "CP_Fecha": cp_fecha_pdf, "CP_Valor": cp_valor_pdf, "CP_OK": cp_ok,
@@ -392,27 +444,24 @@ if ex_file is not None and len(pdf_files) > 0:
                     "Alerta_Fuera_Año": fuera_anio, "Alerta_Fuera_Trimestre": fuera_trimestre,
                     "Falta_PDF": falta_pdf, "Sobra_PDF": sobra_pdf,
                     "Hallazgos": hallazgos, "Claridad_1_10": claridad,
-                    "Resultado_Final": resultado_final,
-                    "PDFs_Vinculados": "; ".join([f.name for f in pdf_files if get_clean_id(f.name) == id_actual])
+                    "Resultado_Final": resultado_final
                 }
                 st.success("Guardado.")
                 st.rerun()
 
     st.divider()
-
-    # ---- REPORTE FINAL (tu guardado pericial) ----
-    if st.button("📊 GENERAR REPORTE DE FIDELIDAD"):
+    if st.button("📊 REPORTE DE FIDELIDAD"):
         rep = pd.DataFrame.from_dict(st.session_state.db_pericial, orient="index")
         st.dataframe(rep, use_container_width=True)
         if not rep.empty:
-            csv = rep.to_csv(index=True).encode("utf-8")
-            st.download_button(
-                "⬇️ Descargar reporte (CSV)",
-                data=csv,
-                file_name="reporte_fidelidad.csv",
-                mime="text/csv"
-            )
-        st.balloons()
+            st.download_button("⬇️ Descargar (CSV)",
+                               data=rep.to_csv().encode("utf-8"),
+                               file_name="reporte_fidelidad.csv", mime="text/csv")
 
-else:
-    st.info("👋 Xavier, cargue la Matriz y los PDFs para activar el Visor Pericial.")
+# -------------------------
+# Si hubo error en preparación, muéstralo abajo
+# -------------------------
+if st.session_state.last_error:
+    st.divider()
+    st.error("Último error capturado:")
+    st.write(st.session_state.last_error)
