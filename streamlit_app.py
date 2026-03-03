@@ -162,9 +162,10 @@ else:
     if (pdf_df["ok"] == False).any():
         st.warning("Algunos PDFs no se pudieron leer o no contienen texto. Revisa la columna 'error'. (Para escaneados, se requiere OCR).")
 
-    # -------- Mapeo con la matriz para enlazar fila ↔ documentos --------
-    st.markdown("---")
-    st.subheader("Enlace de PDFs con filas de la matriz")
+   
+# -------- Mapeo con la matriz para enlazar fila ↔ documentos --------
+st.markdown("---")
+st.subheader("Enlace de PDFs con filas de la matriz"
 
     # Sugerencias según columnas que vi en tu tablero
     sug_serie = next((c for c in df.columns if re.search(r"\bSERIE\b", str(c), flags=re.IGNORECASE)), None)
