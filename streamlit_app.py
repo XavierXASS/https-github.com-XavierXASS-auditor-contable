@@ -5,172 +5,166 @@ import numpy as np
 import io, re, unicodedata
 import pdfplumber
 from datetime import datetime
-# ================================================================================# =========================
+# =========================
 # Sección: Procesamiento de PDFs y cotejo con la matriz
 # =========================
+
 st.markdown("---")
 st.subheader("Procesamiento de PDFs y cotejo con la matriz")
 
+# -------- Utilidades de normalización y extracción (nivel superior, sin sangría) --------
+def _norm_txt(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s
+
+def _clean_benef(s: str) -> str:
+    s = _norm_txt(s).upper().strip()
+    s = re.sub(r"\s+", " ", s)
+    return s[:200]
+
+def _parse_money(s: str):
+    if s is None:
+        return np.nan
+    s = str(s)
+    # Mantener dígitos, coma, punto y signo
+    s = re.sub(r"[^\d,\.\-]", "", s)
+    # Si hay coma y no hay punto, tratar coma como decimal
+    if "," in s and "." not in s:
+        s = s.replace(",", ".")
+    # Eliminar separadores de miles ambiguos (puntos entre miles)
+    s = re.sub(r"(?<=\d)\.(?=\d{3}\b)", "", s)
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+def _find_first(pattern, text, flags=re.IGNORECASE):
+    m = re.search(pattern, text, flags)
+    return m.group(0) if m else None
+
+def _find_near_amount(keys, text):
+    """
+    Busca cantidades cercanas a palabras clave (línea +/- 1).
+    Devuelve la primera que parezca válida.
+    """
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        for k in keys:
+            if re.search(k, ln, flags=re.IGNORECASE):
+                # revisar misma línea y vecinas
+                cand = " ".join(lines[max(0, i-1):min(len(lines), i+2)])
+                m = re.search(r"[-+]?\d[\d\.\,]*\d", cand)
+                if m:
+                    val = _parse_money(m.group(0))
+                    if not np.isnan(val):
+                        return val
+    return np.nan
+
+def classify_document(text_norm: str) -> str:
+    t = text_norm
+    if re.search(r"\bSPI\b|SISTEMA DE PAGOS INTERBANCARIOS|BANCO CENTRAL|BCE", t):
+        return "SPI"
+    if re.search(r"COMPROBANTE\s+DE\s+PAGO|ORDEN\s+DE\s+PAGO|PAGO\s+N[ou]", t):
+        return "PAGO"
+    if re.search(r"COMPROBANTE\s+DE\s+RETENCION|RETENCION|RETENCI[ÓO]N", t):
+        return "RETENCION"
+    if re.search(r"COMPROBANTE\s+CONTABLE|ASIENTO\s+CONTABLE|DIARIO\s+GENERAL", t):
+        return "CONTABLE"
+    if re.search(r"FACTURA|FACT\.|NOTA\s+DE\s+VENTA|COMPROBANTE\s+DE\s+VENTA", t):
+        return "FACTURA"
+    return "OTRO"
+
+def extract_pdf_fields(file) -> dict:
+    # Extraer texto de todas las páginas (sin OCR)
+    try:
+        with pdfplumber.open(file) as pdf:
+            pages_text = []
+            for pg in pdf.pages:
+                t = pg.extract_text() or ""
+                pages_text.append(t)
+        full_text = "\n".join(pages_text)
+    except Exception as e:
+        return {"file": file.name, "ok": False, "error": f"Lectura PDF falló: {e}"}
+
+    text_norm = _norm_txt(full_text)
+    if not text_norm or len(text_norm.strip()) < 40:
+        # Muy poco texto -> probablemente escaneado
+        return {"file": file.name, "ok": False, "error": "PDF sin texto (probable escaneo). Requiere OCR."}
+
+    tipo = classify_document(text_norm)
+
+    # Campos comunes
+    ruc = _find_first(r"\b\d{13}\b", text_norm)  # RUC de 13 dígitos (EC)
+    # factura típica: 001-002-000123456
+    factura = _find_first(r"\b\d{3}[- ]\d{3}[- ]\d{6,9}\b", text_norm)
+    # fecha dd/mm/yyyy o yyyy-mm-dd
+    fecha = _find_first(r"\b(?:\d{2}[/-]\d{2}[/-]\d{4}|\d{4}[/-]\d{2}[/-]\d{2})\b", text_norm)
+    benef = None
+    for k in [r"RAZ[OÓ]N\s+SOCIAL[: ]", r"BENEFICIARIO[: ]", r"PROVEEDOR[: ]", r"NOMBRE[: ]"]:
+        m = re.search(k + r"(.{3,80})", text_norm, flags=re.IGNORECASE)
+        if m:
+            benef = _clean_benef(m.group(1))
+            break
+
+    # Montos por tipo de documento
+    subtotal = iva = total = np.nan
+    ret_iva = ret_renta = ret_total = np.nan
+    valor_pago = valor_spi = valor_contable = np.nan
+
+    if tipo == "FACTURA":
+        subtotal = _find_near_amount([r"\bSUBTOTAL\b"], text_norm)
+        iva = _find_near_amount([r"\bIVA\b"], text_norm)
+        total = _find_near_amount([r"\bTOTAL\b", r"\bVALOR\s*A\s*PAGAR\b"], text_norm)
+    elif tipo == "RETENCION":
+        ret_iva = _find_near_amount([r"RETENCION\s+IVA", r"\bIVA\s+\d+%"], text_norm)
+        ret_renta = _find_near_amount([r"RETENCION\s+RENTA", r"\bRENTA\s+\d+%"], text_norm)
+        rt = _find_near_amount([r"TOTAL\s+RETENCI[OÓ]N", r"TOTAL\s+RETENCIONES"], text_norm)
+        ret_total = rt if not np.isnan(rt) else (0 if (np.isnan(ret_iva) and np.isnan(ret_renta)) else np.nansum([ret_iva, ret_renta]))
+    elif tipo == "PAGO":
+        valor_pago = _find_near_amount([r"\bVALOR\b", r"\bMONTO\b", r"\bTOTAL\b"], text_norm)
+    elif tipo == "SPI":
+        valor_spi = _find_near_amount([r"\bVALOR\b", r"\bMONTO\b", r"\bTOTAL\b"], text_norm)
+    elif tipo == "CONTABLE":
+        valor_contable = _find_near_amount([r"\bHABER\b", r"\bTOTAL\b"], text_norm)
+
+    return {
+        "file": file.name, "ok": True, "error": None,
+        "tipo": tipo, "ruc": ruc, "factura": factura, "fecha_doc": fecha,
+        "beneficiario": benef,
+        "subtotal": subtotal, "iva": iva, "total": total,
+        "ret_iva": ret_iva, "ret_renta": ret_renta, "ret_total": ret_total,
+        "valor_pago": valor_pago, "valor_spi": valor_spi, "valor_contable": valor_contable,
+        "texto_len": len(text_norm)
+    }
+
+# -------- UI y lógica (con sangría simple, solo dentro de if/else) --------
 if not uploaded_pdfs:
     st.info("Sube los PDFs (Factura, Retención, Comprobante de Pago, SPI, Comprobante Contable) en la barra lateral para habilitar el cotejo.")
 else:
     st.caption(f"Se recibieron {len(uploaded_pdfs)} PDF(s).")
 
-    # -------- Utilidades de normalización y extracción --------
-    def _norm_txt(s: str) -> str:
-        if s is None:
-            return ""
-        s = str(s)
-        s = unicodedata.normalize("NFKD", s)
-        s = "".join(ch for ch in s if not unicodedata.combining(ch))
-        return s
-
-    def _clean_benef(s: str) -> str:
-        s = _norm_txt(s).upper().strip()
-        s = re.sub(r"\s+", " ", s)
-        return s[:200]
-
-    def _parse_money(s: str):
-        if s is None:
-            return np.nan
-        s = str(s)
-        # Mantener dígitos, coma, punto y signo
-        s = re.sub(r"[^\d,\.\-]", "", s)
-        # Si hay coma y no hay punto, tratar coma como decimal
-        if "," in s and "." not in s:
-            s = s.replace(",", ".")
-        # Eliminar separadores de miles ambiguos
-        s = re.sub(r"(?<=\d)\.(?=\d{3}\b)", "", s)
-        try:
-            return float(s)
-        except Exception:
-            return np.nan
-
-    def _find_first(pattern, text, flags=re.IGNORECASE):
-        m = re.search(pattern, text, flags)
-        return m.group(0) if m else None
-
-    def _find_near_amount(keys, text):
-        """
-        Busca cantidades cercanas a palabras clave (línea +/- 1).
-        Devuelve la primera que parezca válida.
-        """
-        # Dividir por líneas para proximidad
-        lines = text.splitlines()
-        for i, ln in enumerate(lines):
-            for k in keys:
-                if re.search(k, ln, flags=re.IGNORECASE):
-                    # revisar misma línea y vecinas
-                    cand = " ".join(lines[max(0, i-1):min(len(lines), i+2)])
-                    m = re.search(r"[-+]?\d[\d\.\,]*\d", cand)
-                    if m:
-                        val = _parse_money(m.group(0))
-                        if not np.isnan(val):
-                            return val
-        return np.nan
-
-    def classify_document(text_norm: str) -> str:
-        t = text_norm
-        # Señales fuertes por palabras clave
-        if re.search(r"\bSPI\b|SISTEMA DE PAGOS INTERBANCARIOS|BANCO CENTRAL|BCE", t):
-            return "SPI"
-        if re.search(r"COMPROBANTE\s+DE\s+PAGO|ORDEN\s+DE\s+PAGO|PAGO\s+N[ou]", t):
-            return "PAGO"
-        if re.search(r"COMPROBANTE\s+DE\s+RETENCION|RETENCION|RETENCI[ÓO]N", t):
-            return "RETENCION"
-        if re.search(r"COMPROBANTE\s+CONTABLE|ASIENTO\s+CONTABLE|DIARIO\s+GENERAL", t):
-            return "CONTABLE"
-        if re.search(r"FACTURA|FACT\.|NOTA\s+DE\s+VENTA|COMPROBANTE\s+DE\s+VENTA", t):
-            return "FACTURA"
-        return "OTRO"
-
-    def extract_pdf_fields(file) -> dict:
-        # Extraer texto de todas las páginas (sin OCR)
-        try:
-            with pdfplumber.open(file) as pdf:
-                pages_text = []
-                for pg in pdf.pages:
-                    t = pg.extract_text() or ""
-                    pages_text.append(t)
-            full_text = "\n".join(pages_text)
-        except Exception as e:
-            return {"file": file.name, "ok": False, "error": f"Lectura PDF falló: {e}"}
-
-        text_norm = _norm_txt(full_text)
-        if not text_norm or len(text_norm.strip()) < 40:
-            # Muy poco texto -> probablemente escaneado
-            return {"file": file.name, "ok": False, "error": "PDF sin texto (probable escaneo). Requiere OCR."}
-
-        tipo = classify_document(text_norm)
-
-        # Campos comunes
-        ruc = _find_first(r"\b\d{13}\b", text_norm)  # RUC de 13 dígitos (EC)
-        # factura típica: 001-002-000123456
-        factura = _find_first(r"\b\d{3}[- ]\d{3}[- ]\d{6,9}\b", text_norm)
-        # fecha dd/mm/yyyy o yyyy-mm-dd
-        fecha = _find_first(r"\b(?:\d{2}[/-]\d{2}[/-]\d{4}|\d{4}[/-]\d{2}[/-]\d{2})\b", text_norm)
-        benef = None
-        for k in [r"RAZ[OÓ]N\s+SOCIAL[: ]", r"BENEFICIARIO[: ]", r"PROVEEDOR[: ]", r"NOMBRE[: ]"]:
-            m = re.search(k + r"(.{3,80})", text_norm, flags=re.IGNORECASE)
-            if m:
-                benef = _clean_benef(m.group(1))
-                break
-
-        # Montos por tipo de documento
-        subtotal = iva = total = np.nan
-        ret_iva = ret_renta = ret_total = np.nan
-        valor_pago = valor_spi = valor_contable = np.nan
-
-        if tipo == "FACTURA":
-            subtotal = _find_near_amount([r"\bSUBTOTAL\b"], text_norm)
-            iva = _find_near_amount([r"\bIVA\b"], text_norm)
-            total = _find_near_amount([r"\bTOTAL\b", r"\bVALOR\s*A\s*PAGAR\b"], text_norm)
-        elif tipo == "RETENCION":
-            ret_iva = _find_near_amount([r"RETENCION\s+IVA", r"\bIVA\s+\d+%"], text_norm)
-            ret_renta = _find_near_amount([r"RETENCION\s+RENTA", r"\bRENTA\s+\d+%"], text_norm)
-            # Intentar total de retención
-            rt = _find_near_amount([r"TOTAL\s+RETENCI[OÓ]N", r"TOTAL\s+RETENCIONES"], text_norm)
-            ret_total = rt if not np.isnan(rt) else (0 if (np.isnan(ret_iva) and np.isnan(ret_renta)) else np.nansum([ret_iva, ret_renta]))
-        elif tipo == "PAGO":
-            valor_pago = _find_near_amount([r"\bVALOR\b", r"\bMONTO\b", r"\bTOTAL\b"], text_norm)
-        elif tipo == "SPI":
-            valor_spi = _find_near_amount([r"\bVALOR\b", r"\bMONTO\b", r"\bTOTAL\b"], text_norm)
-        elif tipo == "CONTABLE":
-            # Muy dependiente del formato. Tomar un 'Total/Haber' como referencia
-            valor_contable = _find_near_amount([r"\bHABER\b", r"\bTOTAL\b"], text_norm)
-
-        return {
-            "file": file.name, "ok": True, "error": None,
-            "tipo": tipo, "ruc": ruc, "factura": factura, "fecha_doc": fecha,
-            "beneficiario": benef,
-            "subtotal": subtotal, "iva": iva, "total": total,
-            "ret_iva": ret_iva, "ret_renta": ret_renta, "ret_total": ret_total,
-            "valor_pago": valor_pago, "valor_spi": valor_spi, "valor_contable": valor_contable,
-            "texto_len": len(text_norm)
-        }
-
-    # -------- Procesar todos los PDFs cargados --------
-    pdf_rows = []
-    for pf in uploaded_pdfs:
-        pdf_rows.append(extract_pdf_fields(pf))
+    # Procesar todos los PDFs cargados
+    pdf_rows = [extract_pdf_fields(pf) for pf in uploaded_pdfs]
     pdf_df = pd.DataFrame(pdf_rows)
 
     st.markdown("**Resumen de PDFs**")
     st.dataframe(pdf_df.fillna(""), use_container_width=True)
 
-    # Señalar PDFs problemáticos
     if (pdf_df["ok"] == False).any():
         st.warning("Algunos PDFs no se pudieron leer o no contienen texto. Revisa la columna 'error'. (Para escaneados, se requiere OCR).")
 
-   
-# -------- Mapeo con la matriz para enlazar fila ↔ documentos --------
-st.markdown("---")
-st.subheader("Enlace de PDFs con filas de la matriz")
+    # -------- Mapeo con la matriz para enlazar fila ↔ documentos --------
+    st.markdown("---")
+    st.subheader("Enlace de PDFs con filas de la matriz")
 
-    # Sugerencias según columnas que vi en tu tablero
+    # Sugerencias según nombres de columnas
     sug_serie = next((c for c in df.columns if re.search(r"\bSERIE\b", str(c), flags=re.IGNORECASE)), None)
-    sug_num = next((c for c in df.columns if re.search(r"\bN.?[UÚ]M", str(c), flags=re.IGNORECASE)), None)
-    sug_ruc = next((c for c in df.columns if re.search(r"\bRUC\b", str(c), flags=re.IGNORECASE)), None)
+    sug_num   = next((c for c in df.columns if re.search(r"\bN.?[UÚ]M", str(c), flags=re.IGNORECASE)), None)
+    sug_ruc   = next((c for c in df.columns if re.search(r"\bRUC\b", str(c), flags=re.IGNORECASE)), None)
     sug_benef = next((c for c in df.columns if re.search(r"NOMBRE|BENEFICIARIO|PROVEEDOR", str(c), flags=re.IGNORECASE)), None)
     sug_fecha = next((c for c in df.columns if re.search(r"FECHA", str(c), flags=re.IGNORECASE)), None)
     sug_total = next((c for c in df.columns if re.search(r"TOTAL|MONTO|VALOR", str(c), flags=re.IGNORECASE)), None)
@@ -192,6 +186,7 @@ st.subheader("Enlace de PDFs con filas de la matriz")
         col_total_m = st.selectbox("Columna TOTAL/VALOR (matriz)", [None] + list(df.columns), index=(list(df.columns).index(sug_total)+1 if sug_total in df.columns else 0))
 
     st.caption("La **clave** de enlace será: RUC + SERIE-NÚMERO (si existen). Si el PDF trae `factura` en formato `001-002-…`, se comparará con SERIE-NÚM.")
+
     ejecutar_link = st.button("Cotejar PDFs vs Matriz")
 
     if ejecutar_link:
@@ -221,18 +216,15 @@ st.subheader("Enlace de PDFs con filas de la matriz")
         pdf_df["ruc_norm"] = pdf_df["ruc"].fillna("").str.strip()
         pdf_df["benef_norm"] = pdf_df["beneficiario"].fillna("").apply(_clean_benef)
 
-        # join por RUC + FACTURA (si hay), luego fallback por FACTURA sola y por beneficiario+fecha
-        joins = []
-
-        # 1) RUC + FACTURA
+        # 1) Join por RUC + FACTURA
         j1 = work.merge(
             pdf_df, left_on=["_RUC_MATRIZ", "_FACT_MATRIZ"], right_on=["ruc_norm", "factura_norm"], how="left", suffixes=("", "_pdf")
         )
         j1["_mecanismo"] = np.where(j1["file"].notna(), "RUC+FACT", None)
-        joins.append(j1)
 
-        # 2) FACTURA sola (para casos sin RUC en PDF)
-        mask_unmatched = joins[0]["file"].isna()
+        # 2) FACTURA sola para los que no coincidieron
+        mask_unmatched = j1["file"].isna()
+        joins = [j1]
         if mask_unmatched.any() and work["_FACT_MATRIZ"].str.len().gt(0).any():
             j2 = work[mask_unmatched].merge(
                 pdf_df, left_on="_FACT_MATRIZ", right_on="factura_norm", how="left", suffixes=("", "_pdf")
@@ -240,18 +232,16 @@ st.subheader("Enlace de PDFs con filas de la matriz")
             j2["_mecanismo"] = np.where(j2["file"].notna(), "FACT", None)
             joins.append(j2)
 
-        # 3) Beneficiario + Fecha (±5 días) para SPI/PAGO/CONT
-        # preparar fecha_doc como datetime
-        pdf_dates = pd.to_datetime(pdf_df["fecha_doc"], errors="coerce", dayfirst=True)
-        pdf_df["_fecha_doc_dt"] = pdf_dates
-
-        left_rem = work
+        # 3) Beneficiario + Fecha (±5 días)
+        pdf_df["_fecha_doc_dt"] = pd.to_datetime(pdf_df["fecha_doc"], errors="coerce", dayfirst=True)
+        # filas restantes (no emparejadas en j1/j2)
+        matched_idx = pd.Index([])
         for jx in joins:
-            left_rem = left_rem.loc[left_rem.index.difference(jx.index)]
+            matched_idx = matched_idx.union(jx.index[jx["file"].notna()])
+        left_rem = work.loc[work.index.difference(matched_idx)]
 
         if not left_rem.empty and col_benef_m and col_fecha_m:
             tmp = left_rem.copy()
-            # Emparejar por beneficiario normalizado; luego filtrar por delta de fecha
             cand = tmp.merge(
                 pdf_df,
                 left_on=tmp["_BENEF_MATRIZ"].str.upper(),
@@ -259,24 +249,16 @@ st.subheader("Enlace de PDFs con filas de la matriz")
                 how="left",
                 suffixes=("", "_pdf"),
             )
-            # filtrar delta de fecha (cuando ambas existen)
             delta_ok = (cand["_fecha_doc_dt"].notna()) & (cand["_FECHA_MATRIZ"].notna()) & (cand["_FECHA_MATRIZ"].sub(cand["_fecha_doc_dt"]).abs().dt.days <= 5)
             cand = cand[delta_ok]
-            cand["_mecanismo"] = np.where(cand["file"].notna(), "BEN+FECHA±5d", None)
             if not cand.empty:
+                cand["_mecanismo"] = np.where(cand["file"].notna(), "BEN+FECHA±5d", None)
                 joins.append(cand)
 
-        # Unir resultados
-        if not joins:
-            st.error("No se pudo enlazar ningún PDF con las filas de la matriz. Revisa el mapeo de columnas.")
-            st.stop()
-
-        # Concatenar y, si hay múltiples coincidencias, elegir preferente por tipo (FACTURA, RETENCION, SPI, PAGO, CONTABLE)
+        # Unir resultados y priorizar por tipo
         all_matches = pd.concat(joins, axis=0, ignore_index=False)
-        # Si hay filas duplicadas con varios PDF, nos quedamos con prioridad FACTURA > RETENCION > SPI > PAGO > CONTABLE > OTRO
         prio = {"FACTURA": 1, "RETENCION": 2, "SPI": 3, "PAGO": 4, "CONTABLE": 5, "OTRO": 6, None: 99}
         all_matches["_prio"] = all_matches["tipo"].map(prio).fillna(99)
-        # keep best per dataframe index (fila de matriz)
         best = all_matches.sort_values(by=["_prio"]).groupby(level=0, as_index=True).head(1)
 
         st.markdown("**Enlaces generados (mejor coincidencia por fila)**")
@@ -288,21 +270,17 @@ st.subheader("Enlace de PDFs con filas de la matriz")
         st.markdown("---")
         st.subheader("Reglas periciales y cálculos")
 
-        # Valor a pagar desde documentos: total factura - retenciones (cuando existan)
         best["_ret_total_est"] = best["ret_total"]
         best.loc[best["_ret_total_est"].isna(), "_ret_total_est"] = np.nansum([best["ret_iva"].fillna(0.0), best["ret_renta"].fillna(0.0)], axis=0)
         best["_apagar_docs"] = np.round(best["total"].fillna(0.0) - best["_ret_total_est"].fillna(0.0), 2)
 
-        # Comparaciones tolerancia 2 decimales exactos
         def _eq2(a, b):
             if pd.isna(a) or pd.isna(b):
                 return False
             return round(float(a), 2) == round(float(b), 2)
 
-        # Beneficiario debe coincidir (normalizado)
         best["_benef_ok"] = best.apply(lambda r: (_clean_benef(r.get("beneficiario")) == _clean_benef(r.get("_BENEF_MATRIZ"))), axis=1)
 
-        # Fechas: la rectora es la de factura (si existe en doc). El resto sirve para pertenencia al proceso (±5 días vs matriz)
         best["_fecha_ok"] = best.apply(
             lambda r: (
                 (pd.to_datetime(r.get("fecha_doc"), errors="coerce") == r.get("_FECHA_MATRIZ"))
@@ -311,46 +289,36 @@ st.subheader("Enlace de PDFs con filas de la matriz")
             axis=1
         )
 
-        # Montos: Factura total = matriz? Valor a pagar = SPI/PAGO/CONTABLE?
         best["_total_vs_matriz"] = best.apply(lambda r: _eq2(r.get("total"), r.get("_TOTAL_MATRIZ")), axis=1) if col_total_m else False
         best["_apagar_vs_spi"] = best.apply(lambda r: _eq2(r.get("_apagar_docs"), r.get("valor_spi")), axis=1)
         best["_apagar_vs_pago"] = best.apply(lambda r: _eq2(r.get("_apagar_docs"), r.get("valor_pago")), axis=1)
         best["_apagar_vs_cont"] = best.apply(lambda r: _eq2(r.get("_apagar_docs"), r.get("valor_contable")), axis=1)
 
-        # Hallazgos por fila (granular, estilo “full”)
         findings = []
         for i, r in best.iterrows():
-            # Por documento
             if pd.isna(r.get("file")):
                 findings.append({"fila": int(i), "campo": "DOCUMENTO", "tipo": "ERROR", "mensaje": "No se encontró PDF enlazado para la fila."})
                 continue
 
-            # Beneficiario mandatorio
             if not r["_benef_ok"]:
                 findings.append({"fila": int(i), "campo": "BENEFICIARIO", "tipo": "ERROR", "mensaje": "Beneficiario difiere entre PDF y matriz."})
 
-            # Fecha (rectora factura; para otros: pertenencia ±5 días)
             if not r["_fecha_ok"]:
                 findings.append({"fila": int(i), "campo": "FECHA", "tipo": "WARN", "mensaje": "Fecha documento no coincide; verificar pertenencia al proceso."})
 
-            # Totales y valor a pagar
             if col_total_m and not r["_total_vs_matriz"] and not pd.isna(r.get("total")) and not pd.isna(r.get("_TOTAL_MATRIZ")):
                 findings.append({"fila": int(i), "campo": "TOTAL", "tipo": "ERROR", "mensaje": "Total de factura difiere del valor en matriz."})
 
-            # Retenciones compatibles con factura
             if r.get("tipo") in ["RETENCION", "FACTURA"] and pd.notna(r.get("total")) and pd.notna(r.get("_ret_total_est")):
                 if r["_ret_total_est"] < 0 or r["_ret_total_est"] > r["total"]:
                     findings.append({"fila": int(i), "campo": "RETENCION", "tipo": "ERROR", "mensaje": "Retenciones inconsistentes con total de factura."})
 
-            # Cotejo de valor a pagar contra SPI/PAGO/CONTABLE
             if r.get("valor_spi") and not r["_apagar_vs_spi"]:
                 findings.append({"fila": int(i), "campo": "SPI", "tipo": "ERROR", "mensaje": "Valor del SPI no coincide con Total - Retenciones."})
             if r.get("valor_pago") and not r["_apagar_vs_pago"]:
                 findings.append({"fila": int(i), "campo": "PAGO", "tipo": "ERROR", "mensaje": "Valor del Comprobante de Pago no coincide con Total - Retenciones."})
             if r.get("valor_contable") and not r["_apagar_vs_cont"]:
                 findings.append({"fila": int(i), "campo": "CONTABLE", "tipo": "ERROR", "mensaje": "Haber/Total contable no coincide con Total - Retenciones."})
-
-            # Nota especial para SUELDOS (sin factura): si la fila es nómina, podremos marcar una columna 'Tipo' en la matriz para activar reglas específicas en el siguiente paso.
 
         findings_df = pd.DataFrame(findings, columns=["fila", "campo", "tipo", "mensaje"])
         if findings_df.empty:
@@ -359,7 +327,6 @@ st.subheader("Enlace de PDFs con filas de la matriz")
             st.warning(f"Cotejo completado con {int((findings_df['tipo']=='ERROR').sum())} errores y {int((findings_df['tipo']=='WARN').sum())} advertencias.")
             st.dataframe(findings_df.sort_values(["tipo","fila","campo"]), use_container_width=True)
 
-            # Descarga CSV
             st.download_button(
                 "⬇️ Descargar hallazgos (CSV)",
                 data=findings_df.to_csv(index=False).encode("utf-8"),
