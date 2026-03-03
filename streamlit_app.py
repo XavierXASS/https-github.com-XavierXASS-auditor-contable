@@ -1,4 +1,11 @@
-# =========================
+# ==== IMPORTS (deben estar al nivel superior, no dentro de if/try/funciones) ====
+import streamlit as st
+import pandas as pd
+import numpy as np
+import io, re, unicodedata
+import pdfplumber
+from datetime import datetime
+# ================================================================================# =========================
 # Sección: Procesamiento de PDFs y cotejo con la matriz
 # =========================
 st.markdown("---")
