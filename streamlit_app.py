@@ -165,7 +165,7 @@ else:
    
 # -------- Mapeo con la matriz para enlazar fila ↔ documentos --------
 st.markdown("---")
-st.subheader("Enlace de PDFs con filas de la matriz"
+st.subheader("Enlace de PDFs con filas de la matriz")
 
     # Sugerencias según columnas que vi en tu tablero
     sug_serie = next((c for c in df.columns if re.search(r"\bSERIE\b", str(c), flags=re.IGNORECASE)), None)
