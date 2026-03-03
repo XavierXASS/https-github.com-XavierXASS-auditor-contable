@@ -1,53 +1,35 @@
 import streamlit as st
 import pandas as pd
-import base64
-import os
 
-# CONFIGURACIÓN BÁSICA - SIN PROCESOS PESADOS
-st.set_page_config(layout="wide")
-DB_FILE = "pericia_final.csv"
+st.set_page_config(page_title="Terminal de Emergencia - Pericia", layout="wide")
 
-if 'db' not in st.session_state:
-    if os.path.exists(DB_FILE):
-        st.session_state.db = pd.read_csv(DB_FILE).set_index('CP').to_dict('index')
-    else:
-        st.session_state.db = {}
+st.title("Terminal de Emergencia - Pericia Xavier")
 
-st.title("🛡️ Terminal de Emergencia - Pericia Xavier")
+# --- Uploader de Excel ---
+uploaded_xlsx = st.file_uploader(
+    "Sube tu matriz en Excel (.xlsx)",
+    type=["xlsx"],
+    key="uploader_excel",
+    accept_multiple_files=False,
+    help="Límite recomendado 200 MB por archivo"
+)
 
-ex_file = st.sidebar.file_uploader("1. Excel", type=["xlsx"])
-pdf_files = st.sidebar.file_uploader("2. PDFs", type=["pdf"], accept_multiple_files=True)
+if uploaded_xlsx is not None:
+    with st.spinner("Leyendo archivo…"):
+        try:
+            # Lee la primera hoja por defecto
+            df = pd.read_excel(uploaded_xlsx, engine="openpyxl")
+            st.success(f"Archivo recibido: {uploaded_xlsx.name} | Filas: {len(df):,} | Columnas: {len(df.columns)}")
+            # Vista previa (primeras 20 filas)
+            st.subheader("Vista previa")
+            st.dataframe(df.head(20), use_container_width=True)
 
-if ex_file and pdf_files:
-    df = pd.read_excel(ex_file)
-    pdf_repo = {re.sub(r'\D', '', f.name): f for f in pdf_files}
-    
-    # Navegación simple por fila
-    idx = st.number_input("Fila de la Matriz:", 0, len(df)-1, value=0)
-    fila = df.iloc[idx]
-    id_actual = re.sub(r'\D', '', str(fila.iloc[0])) # Toma el CP de la primera columna
+            # Info rápida de columnas (útil para validar nombres escritos)
+            st.subheader("Columnas detectadas")
+            st.write(list(df.columns))
 
-    col1, col2 = st.columns([1.5, 1])
-    
-    with col1:
-        if id_actual in pdf_repo:
-            f = pdf_repo[id_actual]
-            b64 = base64.b64encode(f.read()).decode('utf-8')
-            st.markdown(f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="800"></iframe>', unsafe_allow_html=True)
-            f.seek(0)
-        else:
-            st.error(f"CP {id_actual} SIN PDF")
-
-    with col2:
-        st.write(fila.dropna())
-        res = st.selectbox("Estado:", ["OK", "HALLAZGO", "SIN PDF"], key=f"sel_{idx}")
-        obs = st.text_area("Notas:", key=f"obs_{idx}")
-        if st.button("💾 GUARDAR LÍNEA"):
-            st.session_state.db[id_actual] = {"Estado": res, "Notas": obs}
-            pd.DataFrame.from_dict(st.session_state.db, orient='index').to_csv(DB_FILE)
-            st.success("Guardado.")
-
-    if st.button("📦 DESCARGAR EXCEL FINAL"):
-        reporte = df.copy()
-        reporte['ESTADO'] = reporte.iloc[:,0].apply(lambda x: st.session_state.db.get(re.sub(r'\D','',str(x)), {}).get('Estado', 'PENDIENTE'))
-        st.download_button("Descargar", reporte.to_csv().encode('utf-8'), "Auditoria_Xavier.csv")
+        except Exception as e:
+            st.error(f"Ocurrió un error leyendo el Excel: {e}")
+else:
+    st.info("Carga tu matriz en la sección de la izquierda para ver la vista previa.")
+``
