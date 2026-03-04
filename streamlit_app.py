@@ -5,6 +5,9 @@ import numpy as np
 import io, re, unicodedata
 import pdfplumber
 from datetime import datetime
+# ---- Defaults de estado para evitar NameError ----
+if "uploaded_pdfs" not in st.session_state:
+    st.session_state["uploaded_pdfs"] = []
 # =========================
 # Sección: Procesamiento de PDFs y cotejo con la matriz
 # =========================
