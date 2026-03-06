@@ -2,3 +2,7 @@ tesseract-ocr
 tesseract-ocr-spa
 libtesseract-dev
 poppler-utils
+
+streamlit>=1.31.0
+requests>=2.31.0
+PyPDF2>=3.0.
